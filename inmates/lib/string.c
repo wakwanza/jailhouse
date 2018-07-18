@@ -38,6 +38,11 @@
 
 #include <inmate.h>
 
+static inline int tolower(int c)
+{
+   return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
 void *memcpy(void *dest, const void *src, unsigned long n)
 {
 	const u8 *s = src;
@@ -55,6 +60,16 @@ void *memset(void *s, int c, unsigned long n)
 	while (n-- > 0)
 		*p++ = c;
 	return s;
+}
+
+int memcmp(const void *s1, const void *s2, unsigned long n)
+{
+	const unsigned char *_s1 = s1, *_s2 = s2;
+
+	while (n-- > 0)
+		if (*_s1++ != *_s2++)
+			return _s1[-1] < _s2[-1] ? -1 : 1;
+	return 0;
 }
 
 unsigned long strlen(const char *s1)
@@ -86,4 +101,21 @@ int strncmp(const char *s1, const char *s2, unsigned long n)
 int strcmp(const char *s1, const char *s2)
 {
 	return strncmp(s1, s2, -1);
+}
+
+int strncasecmp(const char *s1, const char *s2, unsigned long n)
+{
+	int diff;
+
+	while (n-- > 0) {
+		diff = tolower(*s1) - tolower(*s2);
+		if (diff)
+			return diff;
+		if (*s1 == 0)
+			break;
+		s1++;
+		s2++;
+	}
+
+	return 0;
 }

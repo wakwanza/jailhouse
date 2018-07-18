@@ -46,9 +46,16 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 {
 	unsigned long hcr = HCR_VM_BIT | HCR_IMO_BIT | HCR_FMO_BIT
 				| HCR_TSC_BIT | HCR_TAC_BIT | HCR_RW_BIT;
+	int err;
+
+	/* link to ID-mapping of trampoline page */
+	err = paging_create_hvpt_link(&cpu_data->pg_structs,
+				      paging_hvirt2phys(&__trampoline_start));
+	if (err)
+		return err;
 
 	/* switch to the permanent page tables */
-	enable_mmu_el2(paging_hvirt2phys(hv_paging_structs.root_table));
+	enable_mmu_el2(paging_hvirt2phys(cpu_data->pg_structs.root_table));
 
 	/* Setup guest traps */
 	arm_write_sysreg(HCR_EL2, hcr);
@@ -56,19 +63,25 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 	return arm_cpu_init(cpu_data);
 }
 
-int arch_init_late(void)
+void __attribute__((noreturn)) arch_cpu_activate_vmm(void)
 {
-	return arm_init_late();
-}
+	unsigned int cpu_id = this_cpu_id();
 
-void __attribute__((noreturn)) arch_cpu_activate_vmm(struct per_cpu *cpu_data)
-{
-	struct registers *regs = guest_regs(cpu_data);
+	/*
+	 * Switch the stack to the private mapping before deactivating the
+	 * common one.
+	 */
+	asm volatile(
+		"add sp, sp, %0"
+		: : "g" (LOCAL_CPU_BASE - (unsigned long)per_cpu(cpu_id)));
+
+	/* Revoke full per_cpu access now that everything is set up. */
+	paging_map_all_per_cpu(cpu_id, false);
 
 	/* return to the caller in Linux */
-	arm_write_sysreg(ELR_EL2, regs->usr[30]);
+	arm_write_sysreg(ELR_EL2, this_cpu_data()->guest_regs.usr[30]);
 
-	vmreturn(regs);
+	vmreturn(&this_cpu_data()->guest_regs);
 }
 
 /* disable the hypervisor on the current CPU */
@@ -77,7 +90,7 @@ void arch_shutdown_self(struct per_cpu *cpu_data)
 	void (*shutdown_func)(struct per_cpu *) =
 		(void (*)(struct per_cpu *))paging_hvirt2phys(shutdown_el2);
 
-	irqchip_cpu_shutdown(cpu_data);
+	irqchip_cpu_shutdown(&cpu_data->public);
 
 	/* Free the guest */
 	arm_write_sysreg(HCR_EL2, HCR_RW_BIT);
@@ -103,14 +116,14 @@ void arch_shutdown_self(struct per_cpu *cpu_data)
 	shutdown_func((struct per_cpu *)paging_hvirt2phys(cpu_data));
 }
 
-void arch_cpu_restore(struct per_cpu *cpu_data, int return_code)
+void arch_cpu_restore(unsigned int cpu_id, int return_code)
 {
-	struct registers *regs = guest_regs(cpu_data);
+	struct per_cpu *cpu_data = per_cpu(cpu_id);
 
 	/* Jailhouse initialization failed; return to the caller in EL1 */
-	arm_write_sysreg(ELR_EL2, regs->usr[30]);
+	arm_write_sysreg(ELR_EL2, cpu_data->guest_regs.usr[30]);
 
-	regs->usr[0] = return_code;
+	cpu_data->guest_regs.usr[0] = return_code;
 
 	arch_shutdown_self(cpu_data);
 }

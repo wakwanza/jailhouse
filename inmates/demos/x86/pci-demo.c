@@ -11,8 +11,8 @@
  *
  *
  * Append "-device intel-hda,addr=1b.0 -device hda-output" to the QEMU command
- * line for testing in the virtual machine. Adjust configs/pci-demo.c for real
- * machines as needed.
+ * line for testing in the virtual machine. Adjust configs/x86/pci-demo.c for
+ * real machines as needed.
  */
 
 #include <inmate.h>
@@ -75,6 +75,5 @@ void inmate_main(void)
 	mmio_write16(hdbar + HDA_WAKEEN, 0x0f);
 	mmio_write32(hdbar + HDA_INTCTL, (1 << 31) | (1 << 30));
 
-	while (1)
-		asm volatile("hlt");
+	halt();
 }

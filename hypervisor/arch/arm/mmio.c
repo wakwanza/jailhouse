@@ -14,16 +14,9 @@
 #include <jailhouse/pci.h>
 #include <jailhouse/printk.h>
 #include <asm/bitops.h>
-#include <asm/irqchip.h>
-#include <asm/mach.h>
-#include <asm/percpu.h>
+#include <jailhouse/percpu.h>
 #include <asm/processor.h>
 #include <asm/traps.h>
-
-unsigned int arch_mmio_count_regions(struct cell *cell)
-{
-	return irqchip_mmio_count_regions(cell) + mach_mmio_regions;
-}
 
 /* Taken from the ARM ARM pseudocode for taking a data abort */
 static void arch_inject_dabt(struct trap_context *ctx, unsigned long addr)
@@ -76,15 +69,15 @@ int arch_handle_dabt(struct trap_context *ctx)
 	unsigned long hpfar;
 	unsigned long hdfar;
 	/* Decode the syndrome fields */
-	u32 icc		= HSR_ICC(ctx->hsr);
-	u32 isv		= icc >> 24;
-	u32 sas		= icc >> 22 & 0x3;
-	u32 sse		= icc >> 21 & 0x1;
-	u32 srt		= icc >> 16 & 0xf;
-	u32 ea		= icc >> 9 & 0x1;
-	u32 cm		= icc >> 8 & 0x1;
-	u32 s1ptw	= icc >> 7 & 0x1;
-	u32 is_write	= icc >> 6 & 0x1;
+	u32 iss		= HSR_ISS(ctx->hsr);
+	u32 isv		= iss >> 24;
+	u32 sas		= iss >> 22 & 0x3;
+	u32 sse		= iss >> 21 & 0x1;
+	u32 srt		= iss >> 16 & 0xf;
+	u32 ea		= iss >> 9 & 0x1;
+	u32 cm		= iss >> 8 & 0x1;
+	u32 s1ptw	= iss >> 7 & 0x1;
+	u32 is_write	= iss >> 6 & 0x1;
 	u32 size	= 1 << sas;
 
 	arm_read_sysreg(HPFAR, hpfar);
@@ -92,7 +85,7 @@ int arch_handle_dabt(struct trap_context *ctx)
 	mmio.address = hpfar << 8;
 	mmio.address |= hdfar & 0xfff;
 
-	this_cpu_data()->stats[JAILHOUSE_CPU_STAT_VMEXITS_MMIO]++;
+	this_cpu_public()->stats[JAILHOUSE_CPU_STAT_VMEXITS_MMIO]++;
 
 	/*
 	 * Invalid instruction syndrome means multiple access or writeback, there

@@ -153,6 +153,7 @@
 				| S1_PTE_ACCESS_EL0)
 
 /* Macros used by the core, only for the EL2 stage-1 mappings */
+#define PAGE_FLAG_FRAMEBUFFER	S1_PTE_FLAG_DEVICE
 #define PAGE_FLAG_DEVICE	S1_PTE_FLAG_DEVICE
 #define PAGE_DEFAULT_FLAGS	(S1_DEFAULT_FLAGS | S1_PTE_ACCESS_RW)
 #define PAGE_READONLY_FLAGS	(S1_DEFAULT_FLAGS | S1_PTE_ACCESS_RO)
@@ -162,12 +163,15 @@
 #define INVALID_PHYS_ADDR	(~0UL)
 
 #define UART_BASE		0xffffc0000000
-#define JAILHOUSE_BASE		0xffffc0200000
 
-#define REMAP_BASE		0x00100000UL
-#define NUM_REMAP_BITMAP_PAGES	4
-
+/**
+ * Location of per-CPU temporary mapping region in hypervisor address space.
+ */
+#define TEMPORARY_MAPPING_BASE	0xff0000000000UL
 #define NUM_TEMPORARY_PAGES	16
+
+#define REMAP_BASE		0xff8000000000UL
+#define NUM_REMAP_BITMAP_PAGES	4
 
 #ifndef __ASSEMBLY__
 
@@ -178,39 +182,14 @@ typedef u64 *pt_entry_t;
 
 extern unsigned int cpu_parange;
 
-/* return the bits supported for the physical address range for this
- * machine; in arch_paging_init this value will be kept in
- * cpu_parange for later reference */
-static inline unsigned int get_cpu_parange(void)
-{
-	unsigned long id_aa64mmfr0;
-
-	arm_read_sysreg(ID_AA64MMFR0_EL1, id_aa64mmfr0);
-
-	switch (id_aa64mmfr0 & 0xf) {
-	case PARANGE_32B:
-		return 32;
-	case PARANGE_36B:
-		return 36;
-	case PARANGE_40B:
-		return 40;
-	case PARANGE_42B:
-		return 42;
-	case PARANGE_44B:
-		return 44;
-	case PARANGE_48B:
-		return 48;
-	default:
-		return 0;
-	}
-}
+unsigned int get_cpu_parange(void);
 
 /* The size of the cpu_parange, determines from which level we can
  * start from the S2 translations, and the size of the first level
  * page table */
 #define T0SZ_CELL		T0SZ(cpu_parange)
 #define SL0_CELL		((cpu_parange >= 44) ? SL0_L0 : SL0_L1)
-#define ARM_CELL_ROOT_PT_SZ				\
+#define CELL_ROOT_PT_PAGES				\
 	({ unsigned int ret = 1;			\
 	   if (cpu_parange > 39 && cpu_parange < 44)	\
 		ret = 1 << (cpu_parange - 39);		\

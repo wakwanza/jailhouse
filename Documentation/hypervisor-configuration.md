@@ -37,49 +37,7 @@ General configuration parameters
      * allows inmates to be booted on bare-metal, without Jailhouse and is
      * mainly used for testing purposes.
      *
-     * See configs/jetson-tk1-demo.c for the usage of this parameter in cell
+     * See configs/arm/jetson-tk1-demo.c for the usage of this parameter in cell
      * configurations.
      */
     #define CONFIG_BARE_METAL 1
-
-### Example board specific configurations
-
-#### ARM
-
-##### BananaPi M1
-
-    #define CONFIG_MACH_BANANAPI 1
-
-##### Nvidia Jetson TK1
-
-    #define CONFIG_MACH_JETSON_TK1 1
-
-##### Xunlong Orange Pi Zero, 256 MiB
-
-    #define CONFIG_MACH_ORANGEPI0 1
-
-##### ARM Fast Model
-
-    #define CONFIG_MACH_VEXPRESS 1
-
-#### ARM64
-
-##### Nvidia Jetson TK1
-
-    #define CONFIG_MACH_JETSON_TX1 1
-
-##### Xilinx Zynq UltraScale+ MPSoC ZCU102
-
-    #define CONFIG_MACH_ZYNQMP_ZCU102 1
-
-##### HiKey LeMaker 2 GiB
-
-    #define CONFIG_MACH_HIKEY 1
-
-##### ARMv8 Foundation Model
-
-    #define CONFIG_MACH_FOUNDATION_V8 1
-
-##### AMD ARM-Opteron A1100
-
-    #define CONFIG_MACH_AMD_SEATTLE 1

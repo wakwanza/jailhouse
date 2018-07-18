@@ -15,7 +15,6 @@
 #include <jailhouse/processor.h>
 #include <jailhouse/string.h>
 #include <asm/control.h>
-#include <asm/mach.h>
 #include <asm/mmu_hyp.h>
 #include <asm/setup.h>
 #include <asm/sysregs.h>
@@ -65,29 +64,11 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 	if (err)
 		return err;
 
-	/*
-	 * Save pointer in the thread local storage
-	 * Must be done early in order to handle aborts and errors in the setup
-	 * code.
-	 */
-	arm_write_sysreg(TPIDR_EL2, cpu_data);
-
 	/* Setup guest traps */
 	arm_write_sysreg(HCR, HCR_VM_BIT | HCR_IMO_BIT | HCR_FMO_BIT |
 			      HCR_TSC_BIT | HCR_TAC_BIT | HCR_TSW_BIT);
 
 	return arm_cpu_init(cpu_data);
-}
-
-int arch_init_late(void)
-{
-	int err;
-
-	err = mach_init();
-	if (err)
-		return err;
-
-	return arm_init_late();
 }
 
 static inline void __attribute__((always_inline))
@@ -106,8 +87,13 @@ cpu_prepare_return_el1(struct per_cpu *cpu_data, int return_code)
 		  "r" (cpu_data->linux_flags));
 }
 
-void __attribute__((noreturn)) arch_cpu_activate_vmm(struct per_cpu *cpu_data)
+void __attribute__((noreturn)) arch_cpu_activate_vmm(void)
 {
+	struct per_cpu *cpu_data = this_cpu_data();
+
+	/* Revoke full per_cpu access now that everything is set up. */
+	paging_map_all_per_cpu(this_cpu_id(), false);
+
 	/* Return to the kernel */
 	cpu_prepare_return_el1(cpu_data, 0);
 
@@ -133,11 +119,10 @@ void __attribute__((noreturn)) arch_cpu_activate_vmm(struct per_cpu *cpu_data)
 
 void arch_shutdown_self(struct per_cpu *cpu_data)
 {
-	irqchip_cpu_shutdown(cpu_data);
+	irqchip_cpu_shutdown(&cpu_data->public);
 
 	/* Free the guest */
 	arm_write_sysreg(HCR, 0);
-	arm_write_sysreg(TPIDR_EL2, 0);
 	arm_write_sysreg(VTCR_EL2, 0);
 
 	/* Remove stage-2 mappings */
@@ -151,9 +136,9 @@ void arch_shutdown_self(struct per_cpu *cpu_data)
 	arch_shutdown_mmu(cpu_data);
 }
 
-void arch_cpu_restore(struct per_cpu *cpu_data, int return_code)
+void arch_cpu_restore(unsigned int cpu_id, int return_code)
 {
-	struct registers *ctx = guest_regs(cpu_data);
+	struct per_cpu *cpu_data = per_cpu(cpu_id);
 
 	/*
 	 * If we haven't reached switch_exception_level yet, there is nothing to
@@ -170,7 +155,7 @@ void arch_cpu_restore(struct per_cpu *cpu_data, int return_code)
 	 */
 	cpu_prepare_return_el1(cpu_data, return_code);
 
-	memcpy(&ctx->usr, &cpu_data->linux_reg,
+	memcpy(&cpu_data->guest_regs.usr, &cpu_data->linux_reg,
 	       NUM_ENTRY_REGS * sizeof(unsigned long));
 
 	arch_shutdown_self(cpu_data);

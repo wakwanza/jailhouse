@@ -26,6 +26,7 @@
 #define PAGE_FLAG_PRESENT	0x01
 #define PAGE_FLAG_RW		0x02
 #define PAGE_FLAG_US		0x04
+#define PAGE_FLAG_FRAMEBUFFER	0x08	/* write-combining */
 #define PAGE_FLAG_DEVICE	0x10	/* uncached */
 #define PAGE_FLAG_NOEXECUTE	0x8000000000000000UL
 
@@ -36,10 +37,16 @@
 
 #define INVALID_PHYS_ADDR	(~0UL)
 
-#define REMAP_BASE		0x0000000000100000UL
+/**
+ * Location of per-CPU temporary mapping region in hypervisor address space.
+ */
+#define TEMPORARY_MAPPING_BASE	0x0000008000000000UL
+#define NUM_TEMPORARY_PAGES	16
+
+#define REMAP_BASE		0xffffff8000000000UL
 #define NUM_REMAP_BITMAP_PAGES	4
 
-#define NUM_TEMPORARY_PAGES	16
+#define CELL_ROOT_PT_PAGES	1
 
 #ifndef __ASSEMBLY__
 

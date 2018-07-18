@@ -14,7 +14,10 @@
 
 include $(src)/../arm-common/Kbuild
 
-always := built-in.o
+always := lib.a
 
-obj-y := $(COMMON_OBJECTS)
-obj-y += entry.o setup.o control.o mmio.o caches.o traps.o
+# units initialization order as defined by linking order:
+# irqchip (common-objs-y), <generic units>
+
+lib-y := $(common-objs-y)
+lib-y += entry.o setup.o control.o mmio.o paging.o caches.o traps.o

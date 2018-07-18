@@ -18,6 +18,7 @@
 #include <asm/gic.h>
 #include <asm/mmio.h>
 #include <asm/psci.h>
+#include <asm/sip.h>
 #include <asm/sysregs.h>
 #include <asm/traps.h>
 #include <asm/processor.h>
@@ -36,10 +37,14 @@ static int handle_smc(struct trap_context *ctx)
 {
 	unsigned long *regs = ctx->regs;
 
-	if (!IS_PSCI_32(regs[0]) && !IS_PSCI_64(regs[0]))
+	if (IS_PSCI_32(regs[0]) || IS_PSCI_64(regs[0])) {
+		regs[0] = psci_dispatch(ctx);
+	} else if (IS_SIP_32(regs[0]) || IS_SIP_64(regs[0])) {
+		/* This can be ignored */
+		regs[0] = SIP_NOT_SUPPORTED;
+	} else {
 		return TRAP_UNHANDLED;
-
-	regs[0] = psci_dispatch(ctx);
+	}
 
 	arch_skip_instruction(ctx);
 
@@ -51,10 +56,15 @@ static int handle_hvc(struct trap_context *ctx)
 	unsigned long *regs = ctx->regs;
 	unsigned long code = regs[0];
 
+	if (ESR_ISS(ctx->esr) != JAILHOUSE_HVC_CODE)
+		return TRAP_FORBIDDEN;
+
 	regs[0] = hypercall(code, regs[1], regs[2]);
 
-	if (code == JAILHOUSE_HC_DISABLE && regs[0] == 0)
-		arch_shutdown_self(this_cpu_data());
+	if (code == JAILHOUSE_HC_DISABLE && regs[0] == 0) {
+		paging_map_all_per_cpu(this_cpu_id(), true);
+		arch_shutdown_self(per_cpu(this_cpu_id()));
+	}
 
 	return TRAP_HANDLED;
 }
@@ -138,7 +148,7 @@ static void dump_hyp_stack(const struct trap_context *ctx)
 					sizeof(this_cpu_data()->stack));
 }
 
-static void fill_trap_context(struct trap_context *ctx, struct registers *regs)
+static void fill_trap_context(struct trap_context *ctx, union registers *regs)
 {
 	arm_read_sysreg(SPSR_EL2, ctx->spsr);
 	switch (SPSR_EL(ctx->spsr)) {	/* exception level */
@@ -167,8 +177,7 @@ static const trap_handler trap_handlers[0x40] =
 	[ESR_EC_DABT_LOW]	= arch_handle_dabt,
 };
 
-static void arch_handle_trap(struct per_cpu *cpu_data,
-			     struct registers *guest_regs)
+static void arch_handle_trap(union registers *guest_regs)
 {
 	struct trap_context ctx;
 	trap_handler handler;
@@ -191,7 +200,7 @@ static void arch_handle_trap(struct per_cpu *cpu_data,
 	}
 }
 
-static void arch_dump_exit(struct registers *regs, const char *reason)
+static void arch_dump_exit(union registers *regs, const char *reason)
 {
 	struct trap_context ctx;
 
@@ -201,18 +210,17 @@ static void arch_dump_exit(struct registers *regs, const char *reason)
 	dump_hyp_stack(&ctx);
 }
 
-struct registers *arch_handle_exit(struct per_cpu *cpu_data,
-				   struct registers *regs)
+union registers *arch_handle_exit(union registers *regs)
 {
-	cpu_data->stats[JAILHOUSE_CPU_STAT_VMEXITS_TOTAL]++;
+	this_cpu_public()->stats[JAILHOUSE_CPU_STAT_VMEXITS_TOTAL]++;
 
 	switch (regs->exit_reason) {
 	case EXIT_REASON_EL1_IRQ:
-		irqchip_handle_irq(cpu_data);
+		irqchip_handle_irq();
 		break;
 
 	case EXIT_REASON_EL1_ABORT:
-		arch_handle_trap(cpu_data, regs);
+		arch_handle_trap(regs);
 		break;
 
 	case EXIT_REASON_EL2_ABORT:

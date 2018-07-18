@@ -17,7 +17,14 @@
 #define HYP_STUB_ABI_LEGACY 0
 #define HYP_STUB_ABI_OPCODE 1
 
-#ifndef __ASSEMBLY__
+
+#ifdef __ASSEMBLY__
+
+#define __JH_CONST_UL(x)	x
+
+#else /* !__ASSEMBLY__ */
+
+#define __JH_CONST_UL(x)	x ## UL
 
 /**
  * @ingroup Setup
@@ -31,7 +38,7 @@
  */
 typedef int (*jailhouse_entry)(unsigned int);
 
-struct jailhouse_console {
+struct jailhouse_virt_console {
 	unsigned int busy;
 	unsigned int tail;
 	/* current implementation requires the size of the content to be a
@@ -74,11 +81,9 @@ struct jailhouse_header {
 	 * @note Filled by Linux loader driver before entry. */
 	unsigned int online_cpus;
 	/** Virtual base address of the debug console device (if used).
-	 * @note Filled by Linux loader driver before entry. */
+	 * @note Filled by Linux loader driver on ARM and x86 before entry.
+	 *       Filled by arch_entry on ARM64. */
 	void *debug_console_base;
-	/** Virtual address of the clock gate register (if used).
-	 * @note Filled by Linux loader driver before entry. */
-	void *debug_clock_reg;
 
 	/** Physical address of Linux's hyp-stubs.
 	 * @note Filled by Linux loader driver before entry. */
@@ -88,4 +93,4 @@ struct jailhouse_header {
 	unsigned int arm_linux_hyp_abi;
 };
 
-#endif
+#endif /* !__ASSEMBLY__ */

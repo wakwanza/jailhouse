@@ -15,7 +15,7 @@
 
 #include <jailhouse/paging.h>
 #include <jailhouse/utils.h>
-#include <asm/percpu.h>
+#include <jailhouse/percpu.h>
 
 /* currently our limit due to fixed-size APID ID map */
 #define APIC_MAX_PHYS_ID		254
@@ -156,14 +156,13 @@ int apic_cpu_init(struct per_cpu *cpu_data);
 
 void apic_clear(void);
 
-void apic_send_nmi_ipi(struct per_cpu *target_data);
+void apic_send_nmi_ipi(struct public_per_cpu *target_data);
 bool apic_filter_irq_dest(struct cell *cell, struct apic_irq_message *irq_msg);
 void apic_send_irq(struct apic_irq_message irq_msg);
 
 void apic_irq_handler(void);
 
-unsigned int apic_mmio_access(unsigned long rip,
-			      const struct guest_paging_structures *pg_structs,
+unsigned int apic_mmio_access(const struct guest_paging_structures *pg_structs,
 			      unsigned int reg, bool is_write);
 
 bool x2apic_handle_write(void);

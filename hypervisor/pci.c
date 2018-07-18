@@ -17,6 +17,7 @@
 #include <jailhouse/pci.h>
 #include <jailhouse/printk.h>
 #include <jailhouse/string.h>
+#include <jailhouse/unit.h>
 #include <jailhouse/utils.h>
 
 #define MSIX_VECTOR_CTRL_DWORD		3
@@ -69,7 +70,7 @@ static void *pci_space;
 static u64 mmcfg_start, mmcfg_size;
 static u8 end_bus;
 
-unsigned int pci_mmio_count_regions(struct cell *cell)
+static unsigned int pci_mmio_count_regions(struct cell *cell)
 {
 	const struct jailhouse_pci_device *dev_infos =
 		jailhouse_cell_pci_devices(cell->config);
@@ -355,26 +356,6 @@ enum pci_access pci_cfg_write_moderate(struct pci_device *device, u16 address,
 	return PCI_ACCESS_PERFORM;
 }
 
-/**
- * Initialization of PCI subsystem.
- *
- * @return 0 on success, negative error code otherwise.
- */
-int pci_init(void)
-{
-	mmcfg_start = system_config->platform_info.pci_mmconfig_base;
-	end_bus = system_config->platform_info.pci_mmconfig_end_bus;
-	mmcfg_size = (end_bus + 1) * 256 * 4096;
-
-	if (mmcfg_start != 0 && !system_config->platform_info.pci_is_virtual) {
-		pci_space = paging_map_device(mmcfg_start, mmcfg_size);
-		if (!pci_space)
-			return -ENOMEM;
-	}
-
-	return pci_cell_init(&root_cell);
-}
-
 static enum mmio_result pci_msix_access_handler(void *arg,
 						struct mmio_access *mmio)
 {
@@ -570,12 +551,8 @@ void pci_reset_device(struct pci_device *device)
 		return;
 	}
 
-	/*
-	 * Silence INTx of the physical device by setting the mask bit.
-	 * This is a deviation from the specified reset state.
-	 */
-	pci_write_config(device->info->bdf, PCI_CFG_COMMAND,
-			 PCI_CMD_INTX_OFF, 2);
+	/* Make sure we can reach the MSI-X registers. */
+	pci_write_config(device->info->bdf, PCI_CFG_COMMAND, PCI_CMD_MEM, 2);
 
 	for_each_pci_cap(cap, device, n) {
 		if (cap->id == PCI_CAP_MSI || cap->id == PCI_CAP_MSIX)
@@ -587,6 +564,13 @@ void pci_reset_device(struct pci_device *device)
 				mmio_write32(&device->msix_table[n].raw[3],
 					     device->msix_vectors[n].raw[3]);
 	}
+
+	/*
+	 * Silence INTx of the physical device by setting the mask bit.
+	 * This is a deviation from the specified reset state.
+	 */
+	pci_write_config(device->info->bdf, PCI_CFG_COMMAND,
+			 PCI_CMD_INTX_OFF, 2);
 }
 
 static int pci_add_physical_device(struct cell *cell, struct pci_device *device)
@@ -667,6 +651,8 @@ static void pci_remove_physical_device(struct pci_device *device)
 	mmio_region_unregister(cell, device->info->msix_address);
 }
 
+static void pci_cell_exit(struct cell *cell);
+
 /**
  * Perform PCI-specific initialization for a new cell.
  * @param cell	Cell to be initialized.
@@ -675,7 +661,7 @@ static void pci_remove_physical_device(struct pci_device *device)
  *
  * @see pci_cell_exit
  */
-int pci_cell_init(struct cell *cell)
+static int pci_cell_init(struct cell *cell)
 {
 	unsigned int devlist_pages = PAGES(cell->config->num_pci_devices *
 					   sizeof(struct pci_device));
@@ -771,7 +757,7 @@ static void pci_return_device_to_root_cell(struct pci_device *device)
  *
  * @see pci_cell_init
  */
-void pci_cell_exit(struct cell *cell)
+static void pci_cell_exit(struct cell *cell)
 {
 	unsigned int devlist_pages = PAGES(cell->config->num_pci_devices *
 					   sizeof(struct pci_device));
@@ -847,9 +833,29 @@ error:
 }
 
 /**
+ * Initialization of PCI subsystem.
+ *
+ * @return 0 on success, negative error code otherwise.
+ */
+static int pci_init(void)
+{
+	mmcfg_start = system_config->platform_info.pci_mmconfig_base;
+	end_bus = system_config->platform_info.pci_mmconfig_end_bus;
+	mmcfg_size = (end_bus + 1) * 256 * 4096;
+
+	if (mmcfg_start != 0 && !system_config->platform_info.pci_is_virtual) {
+		pci_space = paging_map_device(mmcfg_start, mmcfg_size);
+		if (!pci_space)
+			return -ENOMEM;
+	}
+
+	return pci_cell_init(&root_cell);
+}
+
+/**
  * Shut down the PCI layer during hypervisor deactivation.
  */
-void pci_shutdown(void)
+static void pci_shutdown(void)
 {
 	const struct jailhouse_pci_capability *cap;
 	struct pci_device *device;
@@ -873,3 +879,5 @@ void pci_shutdown(void)
 					 PCI_CMD_INTX_OFF, 2);
 	}
 }
+
+DEFINE_UNIT(pci, "PCI");

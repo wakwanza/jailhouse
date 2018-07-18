@@ -38,6 +38,25 @@ announced for new Xeon processors. Of course, running code under Jailhouse is
 slightly slower than on a dedicated uniprocessor machine, but virtualization
 always comes at price.
 
+**Q: Fault tolerance: how can I prevent a buggy/misbehaving inmate from hanging
+the root cell by never replying to a request?**
+
+A: If the cell does not need or should not be able to vote over system
+reconfigurations, you can simply set ```.flags = JAILHOUSE_CELL_PASSIVE_COMMREG```
+in the cell config.
+Otherwise, use the ```msg_reply_timeout``` field in the cell config to specify
+the number of idle loops the root cell must wait for a reply before considering
+the cell as failing.
+
+**Q: Which open-source OSs can be currently run in non-root cells?**
+
+A: The following open-source OSs have been currently ported to Jailhouse:
+* [Linux](Documentation/non-root-linux.txt)
+* [FreeRTOS](https://github.com/siemens/freertos-cell)
+* [ERIKA3 RTOS](http://www.erika-enterprise.com/wiki/index.php?title=ERIKA3_on_the_Jailhouse_hypervisor)
+* [Zephyr](https://www.zephyrproject.org)
+
+
 Debugging
 ---------
 
@@ -64,6 +83,7 @@ Please note Jailhouse developers may ask you for these logs, shall you come for
 help to jailhouse-dev mailing list, because they are extremely useful to analyze
 machine hangs. So please have the logs at hand, if possible.
 
+
 Development
 -----------
 
@@ -72,4 +92,3 @@ Development
 Run ```make docs``` to create automatic documentation (it needs Doxygen
 installed). The documentation will be generated inside the
 ```Documentation/generated/``` directory.
-

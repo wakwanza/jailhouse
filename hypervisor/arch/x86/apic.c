@@ -45,13 +45,13 @@ static u32 apic_reserved_bits[] = {
 	[0x0c ... 0x0e] = -1,
 	[0x0f]          = 0xfffffc00,	/* SVR */
 	[0x10 ... 0x2e] = -1,
-	[0x2f]          = 0xfffef800,	/* CMCI */
+	[0x2f]          = 0xfffee800,	/* CMCI */
 	[0x30]          = 0xfff33000,	/* ICR (0..31) */
 	[0x31]          = -1,
-	[0x32]          = 0xfff8ff00,	/* Timer */
-	[0x33 ... 0x34] = 0xfffef800,	/* Thermal, Perf */
-	[0x35 ... 0x36] = 0xfff0f800,	/* LINT0, LINT1 */
-	[0x37]          = 0xfffeff00,	/* Error */
+	[0x32]          = 0xfff8ef00,	/* Timer */
+	[0x33 ... 0x34] = 0xfffee800,	/* Thermal, Perf */
+	[0x35 ... 0x36] = 0xfff0e800,	/* LINT0, LINT1 */
+	[0x37]          = 0xfffeef00,	/* Error */
 	[0x38]		= 0,		/* Initial Counter */
 	[0x39 ... 0x3d] = -1,
 	[0x3e]		= 0xfffffff4,	/* DCR */
@@ -132,7 +132,7 @@ int apic_cpu_init(struct per_cpu *cpu_data)
 	unsigned int xlc = MAX((apic_ext_features() >> 16) & 0xff,
 			       APIC_REG_XLVT3 - APIC_REG_XLVT0 + 1);
 	unsigned int apic_id = (unsigned int)phys_processor_id();
-	unsigned int cpu_id = cpu_data->cpu_id;
+	unsigned int cpu_id = cpu_data->public.cpu_id;
 	unsigned int n;
 	u32 ldr;
 
@@ -151,9 +151,9 @@ int apic_cpu_init(struct per_cpu *cpu_data)
 	}
 
 	apic_to_cpu_id[apic_id] = cpu_id;
-	cpu_data->apic_id = apic_id;
+	cpu_data->public.apic_id = apic_id;
 
-	cpu_data->sipi_vector = -1;
+	cpu_data->public.sipi_vector = -1;
 
 	/*
 	 * Extended APIC Register Space (currently, AMD thus xAPIC only).
@@ -206,7 +206,7 @@ int apic_init(void)
 	return 0;
 }
 
-void apic_send_nmi_ipi(struct per_cpu *target_data)
+void apic_send_nmi_ipi(struct public_per_cpu *target_data)
 {
 	apic_ops.send_ipi(target_data->apic_id,
 			  APIC_ICR_DLVR_NMI |
@@ -390,7 +390,8 @@ static void apic_send_ipi(unsigned int target_cpu_id, u32 orig_icr_hi,
 				   icr_lo & APIC_ICR_VECTOR_MASK);
 		break;
 	default:
-		apic_ops.send_ipi(per_cpu(target_cpu_id)->apic_id, icr_lo);
+		apic_ops.send_ipi(public_per_cpu(target_cpu_id)->apic_id,
+				  icr_lo);
 	}
 }
 
@@ -483,8 +484,7 @@ static bool apic_invalid_lvt_delivery_mode(unsigned int reg, u32 val)
 	return true;
 }
 
-unsigned int apic_mmio_access(unsigned long rip,
-			      const struct guest_paging_structures *pg_structs,
+unsigned int apic_mmio_access(const struct guest_paging_structures *pg_structs,
 			      unsigned int reg, bool is_write)
 {
 	struct mmio_instruction inst;
@@ -495,7 +495,7 @@ unsigned int apic_mmio_access(unsigned long rip,
 		return 0;
 	}
 
-	inst = x86_mmio_parse(rip, pg_structs, is_write);
+	inst = x86_mmio_parse(pg_structs, is_write);
 	if (inst.inst_len == 0)
 		return 0;
 	if (inst.access_size != 4) {
@@ -514,7 +514,7 @@ unsigned int apic_mmio_access(unsigned long rip,
 			if (!apic_handle_icr_write(val, dest))
 				return 0;
 		} else if (reg == APIC_REG_LDR &&
-			 val != 1UL << (this_cpu_id() + XAPIC_DEST_SHIFT)) {
+			   val != 1UL << (this_cpu_id() + XAPIC_DEST_SHIFT)) {
 			panic_printk("FATAL: Unsupported change to LDR: %x\n",
 				     val);
 			return 0;

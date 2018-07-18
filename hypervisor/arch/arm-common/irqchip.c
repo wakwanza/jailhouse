@@ -18,6 +18,7 @@
 #include <jailhouse/paging.h>
 #include <jailhouse/printk.h>
 #include <jailhouse/string.h>
+#include <jailhouse/unit.h>
 #include <asm/control.h>
 #include <asm/gic.h>
 #include <asm/irqchip.h>
@@ -103,18 +104,18 @@ restrict_bitmask_access(struct mmio_access *mmio, unsigned int reg_index,
 
 void gic_handle_sgir_write(struct sgi *sgi)
 {
-	struct per_cpu *cpu_data = this_cpu_data();
+	struct public_per_cpu *cpu_public = this_cpu_public();
 	unsigned int cpu, target;
 	u64 cluster;
 
 	if (sgi->routing_mode == 2)
 		/* Route to the caller itself */
-		irqchip_set_pending(cpu_data, sgi->id);
+		irqchip_set_pending(cpu_public, sgi->id);
 	else
-		for_each_cpu(cpu, cpu_data->cell->cpu_set) {
+		for_each_cpu(cpu, this_cell()->cpu_set) {
 			if (sgi->routing_mode == 1) {
 				/* Route to all (cell) CPUs but the caller. */
-				if (cpu == cpu_data->cpu_id)
+				if (cpu == cpu_public->cpu_id)
 					continue;
 			} else {
 				target = irqchip_get_cpu_target(cpu);
@@ -126,7 +127,7 @@ void gic_handle_sgir_write(struct sgi *sgi)
 					continue;
 			}
 
-			irqchip_set_pending(per_cpu(cpu), sgi->id);
+			irqchip_set_pending(public_per_cpu(cpu), sgi->id);
 		}
 }
 
@@ -174,7 +175,7 @@ static enum mmio_result gic_handle_dist_access(void *arg,
 	return ret;
 }
 
-void irqchip_handle_irq(struct per_cpu *cpu_data)
+void irqchip_handle_irq(void)
 {
 	unsigned int count_event = 1;
 	bool handled = false;
@@ -189,11 +190,10 @@ void irqchip_handle_irq(struct per_cpu *cpu_data)
 
 		/* Handle IRQ */
 		if (is_sgi(irq_id)) {
-			arch_handle_sgi(cpu_data, irq_id, count_event);
+			arch_handle_sgi(irq_id, count_event);
 			handled = true;
 		} else {
-			handled = arch_handle_phys_irq(cpu_data, irq_id,
-						       count_event);
+			handled = arch_handle_phys_irq(irq_id, count_event);
 		}
 		count_event = 0;
 
@@ -220,38 +220,41 @@ bool irqchip_has_pending_irqs(void)
 	return irqchip.has_pending_irqs();
 }
 
-void irqchip_set_pending(struct per_cpu *cpu_data, u16 irq_id)
+void irqchip_set_pending(struct public_per_cpu *cpu_public, u16 irq_id)
 {
-	bool local_injection = (this_cpu_data() == cpu_data);
+	struct pending_irqs *pending = &cpu_public->pending_irqs;
+	bool local_injection = (this_cpu_public() == cpu_public);
+	const u16 sender = this_cpu_id();
 	unsigned int new_tail;
 	struct sgi sgi;
 
-	if (!cpu_data) {
+	if (!cpu_public) {
 		/* Injection via GICD */
 		mmio_write32(gicd_base + GICD_ISPENDR + (irq_id / 32) * 4,
 			     1 << (irq_id % 32));
 		return;
 	}
 
-	if (local_injection && irqchip.inject_irq(cpu_data, irq_id) != -EBUSY)
+	if (local_injection && irqchip.inject_irq(irq_id, sender) != -EBUSY)
 		return;
 
-	spin_lock(&cpu_data->pending_irqs_lock);
+	spin_lock(&pending->lock);
 
-	new_tail = (cpu_data->pending_irqs_tail + 1) % MAX_PENDING_IRQS;
+	new_tail = (pending->tail + 1) % MAX_PENDING_IRQS;
 
 	/* Queue space available? */
-	if (new_tail != cpu_data->pending_irqs_head) {
-		cpu_data->pending_irqs[cpu_data->pending_irqs_tail] = irq_id;
-		cpu_data->pending_irqs_tail = new_tail;
+	if (new_tail != pending->head) {
+		pending->irqs[pending->tail] = irq_id;
+		pending->sender[pending->tail] = sender;
+		pending->tail = new_tail;
 		/*
-		 * Make the change to pending_irqs_tail visible before the
+		 * Make the change to pending_irqs.tail visible before the
 		 * caller sends SGI_INJECT.
 		 */
 		memory_barrier();
 	}
 
-	spin_unlock(&cpu_data->pending_irqs_lock);
+	spin_unlock(&pending->lock);
 
 	/*
 	 * The list registers are full, trigger maintenance interrupt if we are
@@ -261,8 +264,9 @@ void irqchip_set_pending(struct per_cpu *cpu_data, u16 irq_id)
 	if (local_injection) {
 		irqchip.enable_maint_irq(true);
 	} else {
-		sgi.targets = irqchip_get_cpu_target(cpu_data->cpu_id);
-		sgi.cluster_id = irqchip_get_cluster_target(cpu_data->cpu_id);
+		sgi.targets = irqchip_get_cpu_target(cpu_public->cpu_id);
+		sgi.cluster_id =
+			irqchip_get_cluster_target(cpu_public->cpu_id);
 		sgi.routing_mode = 0;
 		sgi.id = SGI_INJECT;
 
@@ -270,14 +274,16 @@ void irqchip_set_pending(struct per_cpu *cpu_data, u16 irq_id)
 	}
 }
 
-void irqchip_inject_pending(struct per_cpu *cpu_data)
+void irqchip_inject_pending(void)
 {
-	u16 irq_id;
+	struct pending_irqs *pending = &this_cpu_public()->pending_irqs;
+	u16 irq_id, sender;
 
-	while (cpu_data->pending_irqs_head != cpu_data->pending_irqs_tail) {
-		irq_id = cpu_data->pending_irqs[cpu_data->pending_irqs_head];
+	while (pending->head != pending->tail) {
+		irq_id = pending->irqs[pending->head];
+		sender = pending->sender[pending->head];
 
-		if (irqchip.inject_irq(cpu_data, irq_id) == -EBUSY) {
+		if (irqchip.inject_irq(irq_id, sender) == -EBUSY) {
 			/*
 			 * The list registers are full, trigger maintenance
 			 * interrupt and leave.
@@ -286,8 +292,7 @@ void irqchip_inject_pending(struct per_cpu *cpu_data)
 			return;
 		}
 
-		cpu_data->pending_irqs_head =
-			(cpu_data->pending_irqs_head + 1) % MAX_PENDING_IRQS;
+		pending->head = (pending->head + 1) % MAX_PENDING_IRQS;
 	}
 
 	/*
@@ -304,6 +309,34 @@ int irqchip_send_sgi(struct sgi *sgi)
 
 int irqchip_cpu_init(struct per_cpu *cpu_data)
 {
+	int err;
+
+	/* Only execute once, on master CPU */
+	if (!irqchip_is_init) {
+		switch (system_config->platform_info.arm.gic_version) {
+		case 2:
+			irqchip = gicv2_irqchip;
+			break;
+		case 3:
+			irqchip = gicv3_irqchip;
+			break;
+		default:
+			return trace_error(-EINVAL);
+		}
+
+		gicd_base = paging_map_device(
+				system_config->platform_info.arm.gicd_base,
+				irqchip.gicd_size);
+		if (!gicd_base)
+			return -ENOMEM;
+
+		err = irqchip.init();
+		if (err)
+			return err;
+
+		irqchip_is_init = true;
+	}
+
 	return irqchip.cpu_init(cpu_data);
 }
 
@@ -319,13 +352,15 @@ u64 irqchip_get_cluster_target(unsigned int cpu_id)
 
 void irqchip_cpu_reset(struct per_cpu *cpu_data)
 {
-	cpu_data->pending_irqs_head = cpu_data->pending_irqs_tail = 0;
+	cpu_data->public.pending_irqs.head = 0;
+	cpu_data->public.pending_irqs.tail = 0;
 
 	irqchip.cpu_reset(cpu_data);
 }
 
-void irqchip_cpu_shutdown(struct per_cpu *cpu_data)
+void irqchip_cpu_shutdown(struct public_per_cpu *cpu_public)
 {
+	struct pending_irqs *pending = &cpu_public->pending_irqs;
 	int irq_id;
 
 	/*
@@ -334,7 +369,7 @@ void irqchip_cpu_shutdown(struct per_cpu *cpu_data)
 	 * executed during the setup phase. It returns an error if the
 	 * initialization do not take place yet.
 	 */
-	if (irqchip.cpu_shutdown(cpu_data) < 0)
+	if (irqchip.cpu_shutdown(cpu_public) < 0)
 		return;
 
 	/*
@@ -349,17 +384,16 @@ void irqchip_cpu_shutdown(struct per_cpu *cpu_data)
 	} while (irq_id >= 0);
 
 	/* Migrate interrupts queued in software. */
-	while (cpu_data->pending_irqs_head != cpu_data->pending_irqs_tail) {
-		irq_id = cpu_data->pending_irqs[cpu_data->pending_irqs_head];
+	while (pending->head != pending->tail) {
+		irq_id = pending->irqs[pending->head];
 
 		irqchip.inject_phys_irq(irq_id);
 
-		cpu_data->pending_irqs_head =
-			(cpu_data->pending_irqs_head + 1) % MAX_PENDING_IRQS;
+		pending->head = (pending->head + 1) % MAX_PENDING_IRQS;
 	}
 }
 
-int irqchip_cell_init(struct cell *cell)
+static int irqchip_cell_init(struct cell *cell)
 {
 	unsigned int mnt_irq = system_config->platform_info.arm.maintenance_irq;
 	const struct jailhouse_irqchip *chip;
@@ -417,7 +451,7 @@ void irqchip_cell_reset(struct cell *cell)
 	}
 }
 
-void irqchip_cell_exit(struct cell *cell)
+static void irqchip_cell_exit(struct cell *cell)
 {
 	const struct jailhouse_irqchip *chip;
 	unsigned int n, pos;
@@ -467,41 +501,7 @@ void irqchip_config_commit(struct cell *cell_added_removed)
 	}
 }
 
-int irqchip_init(void)
-{
-	int err;
-
-	/* Only executed on master CPU */
-	if (irqchip_is_init)
-		return 0;
-
-	switch (system_config->platform_info.arm.gic_version) {
-	case 2:
-		irqchip = gicv2_irqchip;
-		break;
-	case 3:
-		irqchip = gicv3_irqchip;
-		break;
-	default:
-		return trace_error(-EINVAL);
-	}
-
-	gicd_base =
-		paging_map_device(system_config->platform_info.arm.gicd_base,
-				  irqchip.gicd_size);
-	if (!gicd_base)
-		return -ENOMEM;
-
-	err = irqchip.init();
-	if (err)
-		return err;
-
-	irqchip_is_init = true;
-
-	return 0;
-}
-
-unsigned int irqchip_mmio_count_regions(struct cell *cell)
+static unsigned int irqchip_mmio_count_regions(struct cell *cell)
 {
 	unsigned int regions = 1; /* GICD */
 
@@ -511,3 +511,12 @@ unsigned int irqchip_mmio_count_regions(struct cell *cell)
 
 	return regions;
 }
+
+static int irqchip_init(void)
+{
+	/* Setup the SPI bitmap */
+	return irqchip_cell_init(&root_cell);
+}
+
+DEFINE_UNIT_SHUTDOWN_STUB(irqchip);
+DEFINE_UNIT(irqchip, "irqchip");

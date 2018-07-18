@@ -17,21 +17,20 @@
 #include <asm/psci.h>
 #include <asm/traps.h>
 
-static long psci_emulate_cpu_on(struct per_cpu *cpu_data,
-				struct trap_context *ctx)
+static long psci_emulate_cpu_on(struct trap_context *ctx)
 {
 	unsigned long mask = IS_PSCI_64(ctx->regs[0]) ? (u64)-1L : (u32)-1;
-	struct per_cpu *target_data;
+	struct public_per_cpu *target_data;
 	bool kick_cpu = false;
 	unsigned int cpu;
 	long result;
 
-	cpu = arm_cpu_by_mpidr(cpu_data->cell, ctx->regs[1] & mask);
+	cpu = arm_cpu_by_mpidr(this_cell(), ctx->regs[1] & mask);
 	if (cpu == -1)
 		/* Virtual id not in set */
 		return PSCI_DENIED;
 
-	target_data = per_cpu(cpu);
+	target_data = public_per_cpu(cpu);
 
 	spin_lock(&target_data->control_lock);
 
@@ -54,27 +53,23 @@ static long psci_emulate_cpu_on(struct per_cpu *cpu_data,
 	return result;
 }
 
-static long psci_emulate_affinity_info(struct per_cpu *cpu_data,
-				       struct trap_context *ctx)
+static long psci_emulate_affinity_info(struct trap_context *ctx)
 {
-	unsigned int cpu = arm_cpu_by_mpidr(cpu_data->cell, ctx->regs[1]);
+	unsigned int cpu = arm_cpu_by_mpidr(this_cell(), ctx->regs[1]);
 
 	if (cpu == -1)
 		/* Virtual id not in set */
 		return PSCI_DENIED;
 
-	return per_cpu(cpu)->wait_for_poweron ?
+	return public_per_cpu(cpu)->wait_for_poweron ?
 		PSCI_CPU_IS_OFF : PSCI_CPU_IS_ON;
 }
 
 long psci_dispatch(struct trap_context *ctx)
 {
-	struct per_cpu *cpu_data = this_cpu_data();
-	u32 function_id = ctx->regs[0];
+	this_cpu_public()->stats[JAILHOUSE_CPU_STAT_VMEXITS_PSCI]++;
 
-	this_cpu_data()->stats[JAILHOUSE_CPU_STAT_VMEXITS_PSCI]++;
-
-	switch (function_id) {
+	switch (ctx->regs[0]) {
 	case PSCI_VERSION:
 		/* Major[31:16], minor[15:0] */
 		return 2;
@@ -83,7 +78,7 @@ long psci_dispatch(struct trap_context *ctx)
 	case PSCI_CPU_SUSPEND_64:
 		if (!irqchip_has_pending_irqs()) {
 			asm volatile("wfi" : : : "memory");
-			irqchip_handle_irq(cpu_data);
+			irqchip_handle_irq();
 		}
 		return 0;
 
@@ -95,11 +90,11 @@ long psci_dispatch(struct trap_context *ctx)
 	case PSCI_CPU_ON_32:
 	case PSCI_CPU_ON_64:
 	case PSCI_CPU_ON_V0_1_UBOOT:
-		return psci_emulate_cpu_on(cpu_data, ctx);
+		return psci_emulate_cpu_on(ctx);
 
 	case PSCI_AFFINITY_INFO_32:
 	case PSCI_AFFINITY_INFO_64:
-		return psci_emulate_affinity_info(cpu_data, ctx);
+		return psci_emulate_affinity_info(ctx);
 
 	default:
 		return PSCI_NOT_SUPPORTED;

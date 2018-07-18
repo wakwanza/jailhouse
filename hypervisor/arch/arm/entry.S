@@ -11,7 +11,6 @@
  */
 
 #include <asm/asm-defines.h>
-#include <asm/percpu.h>
 #include <asm/processor.h>
 
 	.arch_extension virt
@@ -24,14 +23,14 @@ arch_entry:
 	push	{r0 - r12}
 
 	ldr	r1, =__page_pool
-	mov	r4, #1
-	lsl	r4, #PERCPU_SIZE_SHIFT_ASM
+	mov	r4, #PERCPU_SIZE_ASM
 	/*
 	 * percpu data = pool + cpuid * shift
 	 * TODO: handle aff1 and aff2
 	 */
 	mla	r1, r4, r0, r1
-	add	r4, r1, #PERCPU_LINUX_SP
+	movw	r2, #PERCPU_LINUX_SP
+	add	r4, r1, r2
 
 	/*
 	 * Save SP, LR, CPSR
@@ -45,7 +44,7 @@ arch_entry:
 	mov	sp, r1
 	add	sp, #PERCPU_STACK_END
 	/*
-	 * Keep some space for a struct registers, in case setup fails and needs
+	 * Keep some space for a union registers, in case setup fails and needs
 	 * to return to the driver through the arch_shutdown_self path.
 	 */
 	sub	sp, #((NUM_USR_REGS + 1) * 4)
@@ -101,7 +100,7 @@ hyp_vectors:
 	b	hyp_fiq
 
 .macro handle_vmexit exit_reason
-	/* Fill the struct registers. Should comply with NUM_USR_REGS */
+	/* Fill the union registers. Should comply with NUM_USR_REGS */
 	push	{r0-r12, lr}
 	mov	r0, #\exit_reason
 	b	vmexit_common
@@ -126,8 +125,7 @@ hyp_trap:
 vmexit_common:
 	push	{r0}
 
-	arm_read_sysreg(TPIDR_EL2, r0)
-	mov	r1, sp
+	mov	r0, sp
 	bl	arch_handle_exit
 
 

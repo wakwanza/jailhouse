@@ -36,12 +36,11 @@
 # THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-GCOV_PROFILE := n
+objs-y := ../string.o ../cmdline.o ../setup.o ../alloc.o ../uart-8250.o
+objs-y += ../printk.o
+objs-y += printk.o gic.o mem.o timer.o setup.o uart.o
+objs-y += uart-xuartps.o uart-mvebu.o uart-hscif.o uart-scifa.o uart-imx.o
+objs-y += uart-pl011.o
+objs-y += gic-v2.o gic-v3.o
 
-OBJS-y := ../string.o ../cmdline.o
-OBJS-y += printk.o gic.o timer.o
-OBJS-y += uart-jailhouse.o uart-pl011.o uart-8250.o uart-8250-8.o
-OBJS-y += uart-xuartps.o uart-mvebu.o uart-hscif.o
-OBJS-y += gic-v2.o gic-v3.o
-
-COMMON_OBJECTS = $(addprefix ../arm-common/,$(OBJS-y))
+common-objs-y = $(addprefix ../arm-common/,$(objs-y))

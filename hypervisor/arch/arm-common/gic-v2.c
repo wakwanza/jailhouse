@@ -40,7 +40,7 @@ static bool gicv2_targets_in_cell(struct cell *cell, u8 targets)
 
 	for (cpu = 0; cpu < ARRAY_SIZE(gicv2_target_cpu_map); cpu++)
 		if (targets & gicv2_target_cpu_map[cpu] &&
-		    per_cpu(cpu)->cell != cell)
+		    public_per_cpu(cpu)->cell != cell)
 			return false;
 
 	return true;
@@ -143,7 +143,7 @@ static int gicv2_cpu_init(struct per_cpu *cpu_data)
 	 */
 	gicv2_clear_pending_irqs();
 
-	cpu_data->gicc_initialized = true;
+	cpu_data->public.gicc_initialized = true;
 
 	/*
 	 * Get the CPU interface ID for this cpu. It can be discovered by
@@ -154,24 +154,24 @@ static int gicv2_cpu_init(struct per_cpu *cpu_data)
 	 * Since those didn't have virtualization extensions, we can safely
 	 * ignore that case.
 	 */
-	if (cpu_data->cpu_id >= ARRAY_SIZE(gicv2_target_cpu_map))
-		return -EINVAL;
+	if (cpu_data->public.cpu_id >= ARRAY_SIZE(gicv2_target_cpu_map))
+		return trace_error(-EINVAL);
 
-	gicv2_target_cpu_map[cpu_data->cpu_id] =
+	gicv2_target_cpu_map[cpu_data->public.cpu_id] =
 		mmio_read32(gicd_base + GICD_ITARGETSR);
 
-	if (gicv2_target_cpu_map[cpu_data->cpu_id] == 0)
-		return -ENODEV;
+	if (gicv2_target_cpu_map[cpu_data->public.cpu_id] == 0)
+		return trace_error(-ENODEV);
 
 	return 0;
 }
 
-static int gicv2_cpu_shutdown(struct per_cpu *cpu_data)
+static int gicv2_cpu_shutdown(struct public_per_cpu *cpu_public)
 {
-	u32 gich_vmcr = mmio_read32(gich_base + GICH_VMCR);
 	u32 gicc_ctlr = 0;
+	u32 gich_vmcr;
 
-	if (!cpu_data->gicc_initialized)
+	if (!cpu_public->gicc_initialized)
 		return -ENODEV;
 
 	mmio_write32(gich_base + GICH_HCR, 0);
@@ -180,6 +180,7 @@ static int gicv2_cpu_shutdown(struct per_cpu *cpu_data)
 	mmio_write32(gicd_base + GICD_ICENABLER,
 		     1 << system_config->platform_info.arm.maintenance_irq);
 
+	gich_vmcr = mmio_read32(gich_base + GICH_VMCR);
 	if (gich_vmcr & GICH_VMCR_EN0)
 		gicc_ctlr |= GICC_CTLR_GRPEN1;
 	if (gich_vmcr & GICH_VMCR_EOImode)
@@ -266,7 +267,7 @@ static int gicv2_send_sgi(struct sgi *sgi)
 	return 0;
 }
 
-static int gicv2_inject_irq(struct per_cpu *cpu_data, u16 irq_id)
+static int gicv2_inject_irq(u16 irq_id, u16 sender)
 {
 	int i;
 	int first_free = -1;
@@ -296,7 +297,9 @@ static int gicv2_inject_irq(struct per_cpu *cpu_data, u16 irq_id)
 	lr = irq_id;
 	lr |= GICH_LR_PENDING_BIT;
 
-	if (!is_sgi(irq_id)) {
+	if (is_sgi(irq_id)) {
+		lr |= (sender & 0x7) << GICH_LR_CPUID_SHIFT;
+	} else {
 		lr |= GICH_LR_HW_BIT;
 		lr |= (u32)irq_id << GICH_LR_PHYS_ID_SHIFT;
 	}

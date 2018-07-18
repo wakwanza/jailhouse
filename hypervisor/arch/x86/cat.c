@@ -12,6 +12,7 @@
 
 #include <jailhouse/control.h>
 #include <jailhouse/printk.h>
+#include <jailhouse/unit.h>
 #include <jailhouse/utils.h>
 #include <asm/cat.h>
 
@@ -22,22 +23,6 @@
 static unsigned int cbm_max, freed_mask;
 static int cos_max = -1;
 static u64 orig_root_mask;
-
-int cat_init(void)
-{
-	int err;
-
-	if (cpuid_ebx(7, 0) & X86_FEATURE_CAT &&
-	    cpuid_ebx(0x10, 0) & (1 << CAT_RESID_L3)) {
-		cbm_max = cpuid_eax(0x10, CAT_RESID_L3) & CAT_CBM_LEN_MASK;
-		cos_max = cpuid_edx(0x10, CAT_RESID_L3) & CAT_COS_MAX_MASK;
-	}
-
-	err = cat_cell_init(&root_cell);
-	orig_root_mask = root_cell.arch.cat_mask;
-
-	return err;
-}
 
 void cat_update(void)
 {
@@ -57,7 +42,7 @@ static void cat_update_cell(struct cell *cell)
 		if (cpu == this_cpu_id())
 			cat_update();
 		else
-			per_cpu(cpu)->update_cat = true;
+			public_per_cpu(cpu)->update_cat = true;
 }
 
 static u32 get_free_cos(void)
@@ -150,7 +135,7 @@ static bool shrink_root_cell_mask(u64 cell_mask)
 	return true;
 }
 
-int cat_cell_init(struct cell *cell)
+static int cat_cell_init(struct cell *cell)
 {
 	const struct jailhouse_cache *cache;
 
@@ -199,7 +184,7 @@ int cat_cell_init(struct cell *cell)
 	return 0;
 }
 
-void cat_cell_exit(struct cell *cell)
+static void cat_cell_exit(struct cell *cell)
 {
 	/*
 	 * Only release the mask of cells with an own partition.
@@ -220,3 +205,23 @@ void cat_cell_exit(struct cell *cell)
 		cat_update_cell(&root_cell);
 	}
 }
+
+static int cat_init(void)
+{
+	int err;
+
+	if (cpuid_ebx(7, 0) & X86_FEATURE_CAT &&
+	    cpuid_ebx(0x10, 0) & (1 << CAT_RESID_L3)) {
+		cbm_max = cpuid_eax(0x10, CAT_RESID_L3) & CAT_CBM_LEN_MASK;
+		cos_max = cpuid_edx(0x10, CAT_RESID_L3) & CAT_COS_MAX_MASK;
+	}
+
+	err = cat_cell_init(&root_cell);
+	orig_root_mask = root_cell.arch.cat_mask;
+
+	return err;
+}
+
+DEFINE_UNIT_SHUTDOWN_STUB(cat);
+DEFINE_UNIT_MMIO_COUNT_REGIONS_STUB(cat);
+DEFINE_UNIT(cat, "Cache Allocation Technology");

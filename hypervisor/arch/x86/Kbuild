@@ -14,16 +14,34 @@
 
 -include $(GEN_CONFIG_MK)
 
-GCOV_PROFILE := n
 ccflags-$(CONFIG_JAILHOUSE_GCOV) += -fprofile-arcs -ftest-coverage
 
-BUILT_IN_OBJECTS := built-in-amd.o built-in-intel.o
-COMMON_OBJECTS := apic.o dbg-write.o entry.o setup.o control.o mmio.o iommu.o \
-		  paging.o pci.o ioapic.o i8042.o vcpu.o vga.o ivshmem.o
+always := lib-amd.a lib-intel.a
 
-always := $(BUILT_IN_OBJECTS)
+common-objs-y := apic.o dbg-write.o entry.o setup.o control.o mmio.o iommu.o \
+		 paging.o pci.o i8042.o vcpu.o efifb.o ivshmem.o
 
-obj-y := $(BUILT_IN_OBJECTS)
+CFLAGS_efifb.o := -I$(src)
 
-built-in-amd-y := $(COMMON_OBJECTS) svm.o amd_iommu.o svm-vmexit.o cat-stubs.o
-built-in-intel-y := $(COMMON_OBJECTS) vmx.o vtd.o vmx-vmexit.o cat.o
+$(obj)/efifb.o: $(src)/altc-8x16
+
+# units initialization order as defined by linking order:
+# iommu, ioapic, [test-device], [cat], <generic units>
+
+common-objs-y += ioapic.o
+
+common-objs-$(CONFIG_TEST_DEVICE) += test-device.o
+
+amd-objs := svm.o amd_iommu.o svm-vmexit.o $(common-objs-y)
+intel-objs := vmx.o vtd.o vmx-vmexit.o $(common-objs-y) cat.o
+
+targets += $(amd-objs) $(intel-objs)
+
+quiet_cmd_link_archive = AR      $@
+cmd_link_archive = rm -f $@; $(AR) rcs$(KBUILD_ARFLAGS) $@ $^
+
+$(obj)/lib-amd.a: $(addprefix $(obj)/,$(amd-objs))
+	$(call if_changed,link_archive)
+
+$(obj)/lib-intel.a: $(addprefix $(obj)/,$(intel-objs))
+	$(call if_changed,link_archive)

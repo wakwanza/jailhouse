@@ -168,7 +168,8 @@ int jailhouse_cmd_cell_create(struct jailhouse_cell_create __user *arg)
 		goto kfree_config_out;
 	}
 
-	if (memcmp(config->signature, JAILHOUSE_CELL_DESC_SIGNATURE,
+	if (cell_params.config_size < sizeof(*config) ||
+	    memcmp(config->signature, JAILHOUSE_CELL_DESC_SIGNATURE,
 		   sizeof(config->signature)) != 0) {
 		pr_err("jailhouse: Not a cell configuration\n");
 		err = -EINVAL;
@@ -181,6 +182,10 @@ int jailhouse_cmd_cell_create(struct jailhouse_cell_create __user *arg)
 	}
 
 	config->name[JAILHOUSE_CELL_NAME_MAXLEN] = 0;
+
+	/* CONSOLE_ACTIVE implies CONSOLE_PERMITTED for non-root cells */
+	if (CELL_FLAGS_VIRTUAL_CONSOLE_ACTIVE(config->flags))
+		config->flags |= JAILHOUSE_CELL_VIRTUAL_CONSOLE_PERMITTED;
 
 	if (mutex_lock_interruptible(&jailhouse_lock) != 0) {
 		err = -EINTR;

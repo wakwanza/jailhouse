@@ -15,7 +15,6 @@
 
 #include <asm/asm-defines.h>
 #include <asm/paging.h>
-#include <asm/percpu.h>
 #include <asm/jailhouse_hypercall.h>
 #include <jailhouse/header.h>
 
@@ -65,8 +64,11 @@ arch_entry:
 
 	adrp	x1, __page_pool
 	ldrh	w2, [x0, #HEADER_MAX_CPUS]
-	lsl	x2, x2, #PERCPU_SIZE_SHIFT_ASM
-	add	x1, x1, x2
+	mov	x3, #PERCPU_SIZE_ASM
+	/*
+	 * sysconfig = pool + max_cpus * percpu_size
+	 */
+	madd	x1, x2, x3, x1
 	ldr	x14, [x1, #SYSCONFIG_DEBUG_CONSOLE_PHYS]
 
 	ldr	x13, =JAILHOUSE_BASE
@@ -134,12 +136,11 @@ el2_entry:
 
 	mov	x0, x16		/* preserved cpuid, will be passed to entry */
 	adrp	x1, __page_pool
-	mov	x2, #(1 << PERCPU_SIZE_SHIFT_ASM)
+	mov	x2, #PERCPU_SIZE_ASM
 	/*
-	 * percpu data = pool + cpuid * shift
+	 * percpu data = pool + cpuid * percpu_size
 	 */
 	madd	x1, x2, x0, x1
-	msr	tpidr_el2, x1
 
 	/* set up the stack and push the root cell's callee saved registers */
 	add	sp, x1, #PERCPU_STACK_END
@@ -156,6 +157,9 @@ el2_entry:
 	 * exit_reason, which we don't use on entry.
 	 */
 	sub	sp, sp, 20 * 8
+
+	mrs	x29, id_aa64mmfr0_el1
+	str	x29, [x1, #PERCPU_ID_AA64MMFR0]
 
 	mov	x29, xzr	/* reset fp,lr */
 	mov	x30, xzr
@@ -274,7 +278,7 @@ bootstrap_vectors:
 
 .macro handle_vmexit exit_reason
 	.align	7
-	/* Fill the struct registers. Should comply with NUM_USR_REGS */
+	/* Fill the union registers. Should comply with NUM_USR_REGS */
 	stp	x29, x30, [sp, #-16]!
 	stp	x27, x28, [sp, #-16]!
 	stp	x25, x26, [sp, #-16]!
@@ -296,8 +300,7 @@ bootstrap_vectors:
 
 	mov	x29, xzr	/* reset fp,lr */
 	mov	x30, xzr
-	mrs	x0, tpidr_el2
-	mov	x1, sp
+	mov	x0, sp
 	bl	arch_handle_exit
 	b	.
 .endm
@@ -388,8 +391,6 @@ shutdown_el2:
 	msr	tcr_el2, xzr
 	isb
 
-	msr	tpidr_el2, xzr
-
 	/* Prepare continuation as vmreturn(guest_registers). */
 	add	x0, x0, #(PERCPU_STACK_END - 32 * 8)
 
@@ -397,7 +398,7 @@ shutdown_el2:
 
 	.globl vmreturn
 vmreturn:
-	/* x0: struct registers* */
+	/* x0: union registers* */
 	mov	sp, x0
 	ldp	x1, x0, [sp], #16	/* x1 is the exit_reason */
 	ldp	x1, x2, [sp], #16

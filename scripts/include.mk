@@ -25,6 +25,7 @@ sbindir		?= $(exec_prefix)/sbin
 libexecdir	?= $(exec_prefix)/libexec
 datarootdir	?= $(prefix)/share
 datadir		?= $(datarootdir)
+man8dir		?= $(datarootdir)/man/man8
 completionsdir	?= /usr/share/bash-completion/completions
 firmwaredir ?= /lib/firmware
 
@@ -32,6 +33,7 @@ firmwaredir ?= /lib/firmware
 INSTALL_DIRECTORIES := $(sbindir)		\
 		       $(libexecdir)		\
 		       $(datadir)		\
+		       $(man8dir)		\
 		       $(completionsdir)	\
 		       $(firmwaredir)
 
@@ -39,6 +41,13 @@ INSTALL         ?= install
 INSTALL_PROGRAM ?= $(INSTALL)
 INSTALL_DATA    ?= $(INSTALL) -m 644
 INSTALL_DIR     ?= $(INSTALL) -d -m 755
+
+PYTHON ?= python
+PIP := $(PYTHON) -m pip
+
+ifeq ($(strip $(shell $(PIP) -V 2> /dev/null | awk '{split($$2,a,"."); if(a[1]>=10) print "y" }')), y)
+PYTHON_PIP_USABLE := yes
+endif
 
 # creates a rule for each dir in $(INSTALL_DIRECTORIES) under the current
 # $(DESTDIR) and additionally to that for each of these dirs a subdir named

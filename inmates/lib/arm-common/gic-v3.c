@@ -37,37 +37,70 @@
  */
 
 #include <asm/sysregs.h>
-#include <mach.h>
 #include <gic.h>
 
-#ifndef GICD_V3_BASE
-#define GICD_V3_BASE		((void *)-1)
-#define GICR_V3_BASE		((void *)-1)
-#endif
+static void *gicd_v3_base;
+static void *gicr_v3_base;
 
+#define GICR_TYPER              0x0008
+#define GICR_TYPER_Last         (1 << 4)
+#define GICR_PIDR2              0xffe8
 #define GICR_SGI_BASE		0x10000
 #define GICR_ISENABLER		GICD_ISENABLER
 
-#define ICC_IAR1_EL1		SYSREG_32(0, c12, c12, 0)
-#define ICC_EOIR1_EL1		SYSREG_32(0, c12, c12, 1)
-#define ICC_PMR_EL1		SYSREG_32(0, c4, c6, 0)
-#define ICC_CTLR_EL1		SYSREG_32(0, c12, c12, 4)
-#define ICC_IGRPEN1_EL1		SYSREG_32(0, c12, c12, 7)
-
-#define ICC_IGRPEN1_EN		0x1
+#define GICD_PIDR2_ARCH(pidr)	(((pidr) & 0xf0) >> 4)
+#define GICR_PIDR2_ARCH		GICD_PIDR2_ARCH
 
 static void gic_v3_enable(unsigned int irqn)
 {
 	if (is_sgi_ppi(irqn))
-		mmio_write32(GICR_V3_BASE + GICR_SGI_BASE + GICR_ISENABLER,
+		mmio_write32(gicr_v3_base + GICR_SGI_BASE + GICR_ISENABLER,
 			     1 << irqn);
 	else if (is_spi(irqn))
-		mmio_write32(GICD_V3_BASE + GICD_ISENABLER + irqn / 32,
+		mmio_write32(gicd_v3_base + GICD_ISENABLER + (irqn / 32) * 4,
 			     1 << (irqn % 32));
 }
 
 static int gic_v3_init(void)
 {
+	unsigned long mpidr;
+	void *redist_addr;
+	void *gicr = NULL;
+	u64 typer;
+	u32 pidr, aff;
+
+	redist_addr = (void*)(unsigned long)comm_region->gicr_base;
+	gicd_v3_base = (void*)(unsigned long)comm_region->gicd_base;
+
+	map_range(gicd_v3_base, PAGE_SIZE, MAP_UNCACHED);
+	map_range(redist_addr, PAGE_SIZE, MAP_UNCACHED);
+
+	arm_read_sysreg(MPIDR, mpidr);
+	aff = (MPIDR_AFFINITY_LEVEL(mpidr, 3) << 24 |
+		MPIDR_AFFINITY_LEVEL(mpidr, 2) << 16 |
+		MPIDR_AFFINITY_LEVEL(mpidr, 1) << 8 |
+		MPIDR_AFFINITY_LEVEL(mpidr, 0));
+
+	/* Find redistributor */
+	do {
+		pidr = mmio_read32(redist_addr + GICR_PIDR2);
+		if (GICR_PIDR2_ARCH(pidr) != 3)
+			break;
+
+		typer = mmio_read64(redist_addr + GICR_TYPER);
+		if ((typer >> 32) == aff) {
+			gicr = redist_addr;
+			break;
+		}
+
+		redist_addr += 0x20000;
+	} while (!(typer & GICR_TYPER_Last));
+
+	if (!gicr)
+		return -1;
+
+	gicr_v3_base = gicr;
+
 	arm_write_sysreg(ICC_CTLR_EL1, 0);
 	arm_write_sysreg(ICC_PMR_EL1, 0xf0);
 	arm_write_sysreg(ICC_IGRPEN1_EL1, ICC_IGRPEN1_EN);
@@ -85,7 +118,7 @@ static u32 gic_v3_read_ack(void)
 	u32 val;
 
 	arm_read_sysreg(ICC_IAR1_EL1, val);
-	return val;
+	return val & 0xffffff;
 }
 
 const struct gic gic_v3 = {
@@ -94,7 +127,3 @@ const struct gic gic_v3 = {
 	.write_eoi = gic_v3_write_eoi,
 	.read_ack = gic_v3_read_ack,
 };
-
-#if GIC_VERSION == 3
-extern const struct gic gic __attribute__((alias("gic_v3")));
-#endif

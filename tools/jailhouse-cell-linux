@@ -12,12 +12,15 @@
 
 from __future__ import print_function
 import argparse
-import ctypes
-import errno
-import fcntl
+import gzip
 import os
 import struct
 import sys
+
+sys.path[0] = os.path.dirname(os.path.abspath(__file__)) + "/.."
+from pyjailhouse.cell import JailhouseCell
+# Imports from directory containing this must be done above
+# import statement, see python documentation on sys.path[0]
 
 libexecdir = None
 
@@ -246,9 +249,13 @@ class X86:
     name = 'x86'
 
     def setup(self, args, config):
-        self._cpu_reset_address = config.cpu_reset_address
+        if config.cpu_reset_address != 0:
+            raise RuntimeError('x86 requires cpu_reset_address=0')
 
-        self._zero_page = X86ZeroPage(args.kernel, args.initrd, config)
+        self.kernel_image = args.kernel.read()
+
+        self._zero_page = X86ZeroPage(self.kernel_image, args.initrd,
+                                      args.kernel_decomp_factor, config)
 
         setup_data = x86_gen_setup_data(config)
 
@@ -281,10 +288,10 @@ jailhouse cell load %s linux-loader.bin -a 0x%x %s -a 0x%x ' %
         print('jailhouse cell start %s' % config.name)
 
     def loader_address(self):
-        return self._cpu_reset_address
+        return 0
 
     def params_address(self):
-        return self._cpu_reset_address + 0x6000
+        return 0x1000
 
     def kernel_address(self):
         return self._zero_page.kernel_load_addr
@@ -302,16 +309,23 @@ jailhouse cell load %s linux-loader.bin -a 0x%x %s -a 0x%x ' %
 class ARMCommon:
     def setup(self, args, config):
         self._cpu_reset_address = config.cpu_reset_address
-        kernel_size = page_align(os.fstat(args.kernel.fileno()).st_size)
-        kernel_load_offset = self.get_kernel_offset(args.kernel)
+
+        (self.kernel_image,
+         self._kernel_gz) = self.get_uncompressed_kernel(args.kernel)
+        kernel_size = page_align(len(self.kernel_image))
+        kernel_load_offset = self.get_kernel_offset(self.kernel_image)
         image_size = kernel_load_offset + kernel_size + self.kernel_alignment()
 
         ramdisk_size = 0
         if args.initrd:
             ramdisk_size = page_align(os.fstat(args.initrd.fileno()).st_size)
             # leave sufficient space between the kernel and the initrd
-            image_size += kernel_size * 4
-            kernel_size *= 5
+            decompression_factor = self.default_decompression_factor()
+            if args.kernel_decomp_factor:
+                decompression_factor = args.kernel_decomp_factor
+            decompression_space = decompression_factor * kernel_size
+            kernel_size += decompression_space
+            image_size += decompression_space
 
         if not args.dtb:
             print('No device tree specified', file=sys.stderr)
@@ -376,6 +390,9 @@ class ARMCommon:
             self.dtb.set_prop('/chosen', 'linux,initrd-end',
                               struct.pack(addr_format, end_addr))
 
+    def params_address(self):
+        return self._cpu_reset_address + 0x1000
+
     def write_params(self, args, config):
         args.write_params.write(self.dtb.get())
         args.write_params.close()
@@ -387,13 +404,17 @@ Modified device tree written. Start Linux with the following commands \
 jailhouse cell create %s\n\
 jailhouse cell load %s linux-loader.bin -a 0x%x -s "%s" -a 0x%x %s -a 0x%x ' %
               (args.config.name, config.name, self.loader_address(),
-               self.params.decode(), self.params_address(), args.kernel.name,
+               self.params.decode(), self.params_address(),
+               args.kernel.name + ('-unzipped' if self._kernel_gz else ''),
                self._kernel_addr), end='')
         if args.initrd:
             print('%s -a 0x%x ' % (args.initrd.name, self._ramdisk_addr),
                   end='')
         print('%s -a 0x%x' % (args.write_params.name, self._dtb_addr))
         print('jailhouse cell start %s' % config.name)
+        if self._kernel_gz:
+            print('\nNote that %s is zipped and requires decompression first.'
+                  % args.kernel.name)
 
     def loader_address(self):
         return self._cpu_reset_address
@@ -414,8 +435,9 @@ jailhouse cell load %s linux-loader.bin -a 0x%x -s "%s" -a 0x%x %s -a 0x%x ' %
 class ARM(ARMCommon):
     name = 'arm'
 
-    def params_address(self):
-        return self._cpu_reset_address + 0x100
+    @staticmethod
+    def get_uncompressed_kernel(kernel):
+        return (kernel.read(), False)
 
     @staticmethod
     def kernel_alignment():
@@ -425,22 +447,35 @@ class ARM(ARMCommon):
     def get_kernel_offset(kernel):
         return 0
 
+    @staticmethod
+    def default_decompression_factor():
+        return 4
+
 
 class ARM64(ARMCommon):
     name = 'arm64'
 
-    def params_address(self):
-        return self._cpu_reset_address + 0x1000
+    @staticmethod
+    def get_uncompressed_kernel(kernel):
+        try:
+            unzipped = gzip.GzipFile(fileobj=kernel)
+            return (unzipped.read(), True)
+        except IOError:
+            kernel.seek(0)
+            return (kernel.read(), False)
 
     @staticmethod
     def kernel_alignment():
         return 0x200000
 
     @staticmethod
-    def get_kernel_offset(kernel):
-        kernel.seek(8)
-        (text_offset,) = struct.unpack_from('<Q', kernel.read(8))
+    def get_kernel_offset(kernel_image):
+        (text_offset,) = struct.unpack_from('<8xQ', kernel_image)
         return text_offset
+
+    @staticmethod
+    def default_decompression_factor():
+        return 1
 
 
 def resolve_arch(defined_arch=None):
@@ -530,8 +565,8 @@ class Irqchip:
 
 
 class Config:
-    _HEADER_FORMAT = '6sH32s4xIIIIIIIIIQ8x'
-    _HEADER_REVISION = 8
+    _HEADER_FORMAT = '6sH32s4xIIIIIIIIIQ8x32x'
+    _HEADER_REVISION = 10
 
     def __init__(self, config_file):
         self.data = config_file.read()
@@ -579,10 +614,10 @@ class Config:
 # see linux/Documentation/x86/boot.txt
 class X86SetupHeader:
     BASE_OFFSET = 0x1f0
-    _HEADER_FORMAT = 'xB2xI8xH14xB7xII8xI4xI28xQQ'
+    _HEADER_FORMAT = 'xB2xI8xH14xB7xII8xI4xI20xI4xQQ'
 
-    def __init__(self, kernel):
-        kernel.seek(X86SetupHeader.BASE_OFFSET)
+    def __init__(self, kernel_image):
+        base = X86SetupHeader.BASE_OFFSET
         parse_size = struct.calcsize(X86SetupHeader._HEADER_FORMAT)
         (self.setup_sects,
          self.syssize,
@@ -592,14 +627,14 @@ class X86SetupHeader:
          self.ramdisk_size,
          self.cmd_line_ptr,
          self.kernel_alignment,
+         self.payload_offset,
          self.setup_data,
          self.pref_address) = \
             struct.unpack(X86SetupHeader._HEADER_FORMAT,
-                          kernel.read(parse_size))
+                          kernel_image[base:base+parse_size])
 
         self.size = 0x202 + (self.jump >> 8) - X86SetupHeader.BASE_OFFSET
-        kernel.seek(X86SetupHeader.BASE_OFFSET)
-        self.data = bytearray(kernel.read(self.size))
+        self.data = bytearray(kernel_image[base:base+self.size])
 
     def set_value_in_data(self, fmt, offset, value):
         struct.pack_into(fmt, self.data, offset - X86SetupHeader.BASE_OFFSET,
@@ -637,10 +672,30 @@ class X86SetupHeader:
         return self.data
 
 
+def get_kernel_compression_method(payload_magic):
+    if payload_magic[0] == 0x1f and payload_magic[1] in (0x8b, 0x9e):
+        return 'gzip'
+    elif payload_magic[0] == 0x42 and payload_magic[1] == 0x5a:
+        return 'bzip2'
+    elif payload_magic[0] == 0x5d and payload_magic[1] == 0x0:
+        return 'lzma'
+    elif payload_magic[0] == 0xfd and payload_magic[1] == 0x37:
+        return 'xz'
+    elif payload_magic[0] == 0x02 and payload_magic[1] == 0x21:
+        return 'lz4'
+    elif payload_magic[0] == 0x89 and payload_magic[1] == 0x4c:
+        return 'lzo'
+    elif payload_magic[0] == 0x7f and payload_magic[1] == 0x45 and \
+            payload_magic[2] == 0x4c and payload_magic[3] == 0x46:
+        return 'uncompressed'
+    else:
+        return 'unknown'
+
+
 # see linux/Documentation/x86/zero-page.txt
 class X86ZeroPage:
-    def __init__(self, kernel, initrd, config):
-        self.setup_header = X86SetupHeader(kernel)
+    def __init__(self, kernel_image, initrd, kernel_decomp_factor, config):
+        self.setup_header = X86SetupHeader(kernel_image)
 
         prot_image_offs = (self.setup_header.setup_sects + 1) * 512
         prot_image_size = self.setup_header.syssize * 16
@@ -654,11 +709,32 @@ class X86ZeroPage:
         ramdisk_size = 0
         ramdisk_load_addr = 0
         if initrd:
-            kernel_size = os.fstat(kernel.fileno()).st_size
+            kernel_size = len(kernel_image)
             ramdisk_size = os.fstat(initrd.fileno()).st_size
-            # same as arm, magic factor 10 works generally fine
+
+            offs = prot_image_offs + self.setup_header.payload_offset
+            payload_magic = bytearray(kernel_image[offs:offs+4])
+            compression_method = get_kernel_compression_method(payload_magic)
+
+            # Unless specified, derive decompression factor from method
+            if kernel_decomp_factor:
+                decompression_factor = kernel_decomp_factor
+            elif compression_method in ('bzip2'):
+                # "Bzip2 uses a large amount of memory."
+                # And that causes a larger binary, thus a smaller factor.
+                decompression_factor = 4
+            elif compression_method in ('lz4', 'lzo'):
+                decompression_factor = 6
+            elif compression_method in ('gzip'):
+                decompression_factor = 7
+            elif compression_method in ('lzma'):
+                decompression_factor = 8
+            else:  # xz or unknown
+                decompression_factor = 9
+            decompression_space = decompression_factor * kernel_size
+
             ramdisk_load_addr = page_align(self.kernel_load_addr +
-                                           10 * kernel_size)
+                                           decompression_space)
 
         self.setup_header.set_ramdisk_image(ramdisk_load_addr)
         self.setup_header.set_ramdisk_size(ramdisk_size)
@@ -681,40 +757,6 @@ class X86ZeroPage:
         for region in self.e820_entries:
             data += region.as_e820()
         return data + bytearray(0x1000 - len(data))
-
-
-class JailhouseCell:
-    JAILHOUSE_CELL_CREATE = 0x40100002
-    JAILHOUSE_CELL_LOAD = 0x40300003
-    JAILHOUSE_CELL_START = 0x40280004
-
-    JAILHOUSE_CELL_ID_UNUSED = -1
-
-    def __init__(self, config):
-        self.name = config.name.encode()
-
-        self.dev = open('/dev/jailhouse')
-
-        cbuf = ctypes.c_buffer(config.data)
-        create = struct.pack('QI4x', ctypes.addressof(cbuf), len(config.data))
-        try:
-            fcntl.ioctl(self.dev, JailhouseCell.JAILHOUSE_CELL_CREATE, create)
-        except IOError as e:
-            if e.errno != errno.EEXIST:
-                raise e
-
-    def load(self, image, address):
-        cbuf = ctypes.create_string_buffer(bytes(image))
-
-        load = struct.pack('i4x32sI4xQQQ8x',
-                           JailhouseCell.JAILHOUSE_CELL_ID_UNUSED, self.name,
-                           1, ctypes.addressof(cbuf), len(image), address)
-        fcntl.ioctl(self.dev, self.JAILHOUSE_CELL_LOAD, load)
-
-    def start(self):
-        start = struct.pack('i4x32s', JailhouseCell.JAILHOUSE_CELL_ID_UNUSED,
-                            self.name)
-        fcntl.ioctl(self.dev, JailhouseCell.JAILHOUSE_CELL_START, start)
 
 
 def x86_gen_setup_data(config):
@@ -755,6 +797,10 @@ parser.add_argument('--write-params', '-w', metavar='FILE',
                          'to the console')
 parser.add_argument('--arch', '-a', metavar='ARCH',
                     help='target architecture')
+parser.add_argument('--kernel-decomp-factor', '-k', metavar='N',
+                    type=int,
+                    help='decompression factor of the kernel image, used to '
+                         'reserve space between the kernel and the initramfs')
 
 try:
     args = parser.parse_args()
@@ -778,8 +824,7 @@ else:
 
     cell = JailhouseCell(config)
     cell.load(open(linux_loader, mode='rb').read(), arch.loader_address())
-    args.kernel.seek(0)
-    cell.load(args.kernel.read(), arch.kernel_address())
+    cell.load(arch.kernel_image, arch.kernel_address())
     if arch.dtb_address():
         cell.load(arch.dtb.get(), arch.dtb_address())
     if args.initrd:

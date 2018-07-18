@@ -18,9 +18,6 @@
 #include <jailhouse/processor.h>
 #include <asm/apic.h>
 #include <asm/bitops.h>
-#include <asm/cat.h>
-#include <asm/ioapic.h>
-#include <asm/iommu.h>
 #include <asm/vcpu.h>
 
 #define IDT_PRESENT_INT		0x00008e00
@@ -151,10 +148,6 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 	read_descriptor(cpu_data, &cpu_data->linux_gs);
 	cpu_data->linux_gs.base = read_msr(MSR_GS_BASE);
 
-	/* set up per-CPU helpers */
-	write_msr(MSR_GS_BASE, (unsigned long)cpu_data);
-	cpu_data->cpu_data = cpu_data;
-
 	/* read registers to restore on first VM-entry */
 	for (n = 0; n < NUM_ENTRY_REGS; n++)
 		cpu_data->linux_reg[n] =
@@ -191,10 +184,10 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 
 	/* swap CR3 */
 	cpu_data->linux_cr3 = read_cr3();
-	write_cr3(paging_hvirt2phys(hv_paging_structs.root_table));
+	write_cr3(paging_hvirt2phys(cpu_data->pg_structs.root_table));
 
 	cpu_data->pat = read_msr(MSR_IA32_PAT);
-	write_msr(MSR_IA32_PAT, PAT_RESET_VALUE);
+	write_msr(MSR_IA32_PAT, PAT_HOST_VALUE);
 
 	cpu_data->mtrr_def_type = read_msr(MSR_IA32_MTRR_DEF_TYPE);
 
@@ -213,37 +206,32 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 	return 0;
 
 error_out:
-	arch_cpu_restore(cpu_data, err);
+	arch_cpu_restore(this_cpu_id(), err);
 	return err;
 }
 
-int arch_init_late(void)
+void __attribute__((noreturn)) arch_cpu_activate_vmm(void)
 {
-	int err;
+	unsigned int cpu_id = this_cpu_id();
 
-	err = iommu_init();
-	if (err)
-		return err;
+	/*
+	 * Switch the stack to the private mapping before deactivating the
+	 * common one.
+	 */
+	asm volatile(
+		"add %0,%%rsp"
+		: : "g" (LOCAL_CPU_BASE - (unsigned long)per_cpu(cpu_id)));
 
-	err = map_root_memory_regions();
-	if (err)
-		return err;
+	/* Revoke full per_cpu access now that everything is set up. */
+	paging_map_all_per_cpu(cpu_id, false);
 
-	err = ioapic_init();
-	if (err)
-		return err;
-
-	return cat_init();
+	vcpu_activate_vmm();
 }
 
-void __attribute__((noreturn)) arch_cpu_activate_vmm(struct per_cpu *cpu_data)
-{
-	vcpu_activate_vmm(cpu_data);
-}
-
-void arch_cpu_restore(struct per_cpu *cpu_data, int return_code)
+void arch_cpu_restore(unsigned int cpu_id, int return_code)
 {
 	static spinlock_t tss_lock;
+	struct per_cpu *cpu_data = per_cpu(cpu_id);
 	unsigned int tss_idx;
 	u64 *linux_gdt;
 

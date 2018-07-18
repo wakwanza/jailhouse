@@ -10,10 +10,10 @@
  * the COPYING file in the top-level directory.
  */
 
+#include <jailhouse/header.h>
+
 #include <asm/paging.h>
 #include <asm/sections.h>
-
-#include <asm/jailhouse_header.h>
 
 SECTIONS
 {
@@ -21,8 +21,10 @@ SECTIONS
 	.header		: { *(.header) }
 
 	. = ALIGN(16);
-	__text_start = .;
-	.text		: { *(.text) }
+	.text		: {
+		__text_start = .;
+		*(.text)
+	}
 
 	. = ALIGN(16);
 	.rodata		: { *(.rodata) }
@@ -31,9 +33,17 @@ SECTIONS
 	.data		: { *(.data) }
 
 	. = ALIGN(8);
-	__init_array_start = .;
-	.init_array	: { *(SORT(.init_array.*)) *(.init_array) }
-	__init_array_end = .;
+	.init_array	: {
+		__init_array_start = .;
+		*(SORT(.init_array.*)) *(.init_array)
+		__init_array_end = .;
+	}
+
+	.units		: {
+		__unit_array_start = .;
+		*(.units);
+		__unit_array_end = .;
+	}
 
 	ARCH_SECTIONS
 

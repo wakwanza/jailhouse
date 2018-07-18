@@ -11,7 +11,7 @@
  */
 
 #include <asm/bitops.h>
-#include <asm/percpu.h>
+#include <jailhouse/percpu.h>
 #include <jailhouse/cell.h>
 #include <jailhouse/cell-config.h>
 
@@ -227,7 +227,7 @@ int arch_unmap_memory_region(struct cell *cell,
  * got restricted, and the cell should keep running.
  * @param cell		Cell for which the caches should get flushed
  *
- * @see per_cpu::flush_vcpu_caches
+ * @see public_per_cpu::flush_vcpu_caches
  */
 void arch_flush_cell_vcpu_caches(struct cell *cell);
 
@@ -271,9 +271,9 @@ void arch_cell_reset(struct cell *cell);
 void arch_config_commit(struct cell *cell_added_removed);
 
 /**
- * Shutdown architecture-specific subsystems while disabling the hypervisor.
+ * Architecture-specific preparations before shutting down the hypervisor.
  */
-void arch_shutdown(void);
+void arch_prepare_shutdown(void);
 
 /**
  * Performs the architecture-specifc steps to stop the current CPU on panic.

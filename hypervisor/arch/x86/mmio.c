@@ -1,7 +1,7 @@
 /*
  * Jailhouse, a Linux-based partitioning hypervisor
  *
- * Copyright (c) Siemens AG, 2013
+ * Copyright (c) Siemens AG, 2013-2018
  * Copyright (c) Valentine Sinitsyn, 2014
  *
  * Authors:
@@ -15,8 +15,6 @@
 #include <jailhouse/mmio.h>
 #include <jailhouse/paging.h>
 #include <jailhouse/printk.h>
-#include <asm/ioapic.h>
-#include <asm/iommu.h>
 #include <asm/vcpu.h>
 
 #define X86_MAX_INST_LEN	15
@@ -53,8 +51,7 @@ struct parse_context {
 	const u8 *inst;
 };
 
-static bool ctx_update(struct parse_context *ctx,
-		       unsigned long *pc, unsigned int advance,
+static bool ctx_update(struct parse_context *ctx, u64 *pc, unsigned int advance,
 		       const struct guest_paging_structures *pg)
 {
 	ctx->inst += advance;
@@ -72,19 +69,31 @@ static bool ctx_update(struct parse_context *ctx,
 	return true;
 }
 
-struct mmio_instruction x86_mmio_parse(unsigned long pc,
-	const struct guest_paging_structures *pg_structs, bool is_write)
+static unsigned int get_address_width(bool has_addrsz_prefix)
+{
+	u16 cs_attr = vcpu_vendor_get_cs_attr();
+	bool long_mode = (vcpu_vendor_get_efer() & EFER_LMA) &&
+		(cs_attr & VCPU_CS_L);
+
+	return long_mode ? (has_addrsz_prefix ? 4 : 8) :
+		(!!(cs_attr & VCPU_CS_DB) ^ has_addrsz_prefix) ? 4 : 2;
+}
+
+struct mmio_instruction
+x86_mmio_parse(const struct guest_paging_structures *pg_structs, bool is_write)
 {
 	struct parse_context ctx = { .remaining = X86_MAX_INST_LEN,
 				     .count = 1 };
 	union registers *guest_regs = &this_cpu_data()->guest_regs;
 	struct mmio_instruction inst = { .inst_len = 0 };
+	u64 pc = vcpu_vendor_get_rip();
+	unsigned int n, skip_len = 0;
 	bool has_immediate = false;
 	union opcode op[4] = { };
 	bool does_write = false;
 	bool has_rex_w = false;
 	bool has_rex_r = false;
-	unsigned int n;
+	bool has_addrsz_prefix = false;
 
 	if (!ctx_update(&ctx, &pc, 0, pg_structs))
 		goto error_noinst;
@@ -104,6 +113,11 @@ restart:
 		goto restart;
 	}
 	switch (op[0].raw) {
+	case X86_PREFIX_ADDR_SZ:
+		if (!ctx_update(&ctx, &pc, 1, pg_structs))
+			goto error_noinst;
+		has_addrsz_prefix = true;
+		goto restart;
 	case X86_OP_MOVZX_OPC1:
 		if (!ctx_update(&ctx, &pc, 1, pg_structs))
 			goto error_noinst;
@@ -123,6 +137,9 @@ restart:
 		inst.access_size = has_rex_w ? 8 : 4;
 		does_write = true;
 		break;
+	case X86_OP_MOVB_FROM_MEM:
+		inst.access_size = 1;
+		break;
 	case X86_OP_MOV_FROM_MEM:
 		inst.access_size = has_rex_w ? 8 : 4;
 		break;
@@ -132,12 +149,12 @@ restart:
 		does_write = true;
 		break;
 	case X86_OP_MOV_MEM_TO_AX:
-		inst.inst_len = ctx.count + 4;
+		inst.inst_len += get_address_width(has_addrsz_prefix);
 		inst.access_size = has_rex_w ? 8 : 4;
 		inst.in_reg_num = 15;
 		goto final;
 	case X86_OP_MOV_AX_TO_MEM:
-		inst.inst_len = ctx.count + 4;
+		inst.inst_len += get_address_width(has_addrsz_prefix);
 		inst.access_size = has_rex_w ? 8 : 4;
 		inst.out_val = guest_regs->by_index[15];
 		does_write = true;
@@ -150,38 +167,34 @@ restart:
 		goto error_noinst;
 
 	op[2].raw = *ctx.inst;
+
+	/* ensure that we are actually talking about mov imm,<mem> */
+	if (op[0].raw == X86_OP_MOV_IMMEDIATE_TO_MEM && op[2].modrm.reg != 0)
+		goto error_unsupported;
+
 	switch (op[2].modrm.mod) {
 	case 0:
-		if (op[2].modrm.rm == 5) { /* 32-bit displacement */
-			inst.inst_len += 4;
-			/* walk displacement bytes, to point to immediate */
-			if (has_immediate &&
-			    !ctx_update(&ctx, &pc, 4, pg_structs))
+		if (op[2].modrm.rm == 4) { /* SIB */
+			if (!ctx_update(&ctx, &pc, 1, pg_structs))
 				goto error_noinst;
-			break;
-		} else if (op[2].modrm.rm != 4) { /* no SIB */
-			break;
+
+			op[3].raw = *ctx.inst;
+			if (op[3].sib.base == 5)
+				skip_len = 4;
+		} else if (op[2].modrm.rm == 5) { /* 32-bit displacement */
+			skip_len = 4;
 		}
-
-
-		if (!ctx_update(&ctx, &pc, 1, pg_structs))
-			goto error_noinst;
-
-		op[3].raw = *ctx.inst;
-		if (op[3].sib.base == 5)
-			inst.inst_len += 4;
 		break;
 	case 1:
 	case 2:
+		skip_len = op[2].modrm.mod == 1 ? 1 : 4;
 		if (op[2].modrm.rm == 4) /* SIB */
-			goto error_unsupported;
-		inst.inst_len += op[2].modrm.mod == 1 ? 1 : 4;
+			skip_len++;
 		break;
 	default:
 		goto error_unsupported;
 	}
 
-	inst.inst_len += ctx.count;
 	if (has_rex_r)
 		inst.in_reg_num = 7 - op[2].modrm.reg;
 	else if (op[2].modrm.reg == 4)
@@ -189,18 +202,32 @@ restart:
 	else
 		inst.in_reg_num = 15 - op[2].modrm.reg;
 
-	if (has_immediate)
+	if (has_immediate) {
+		/* walk any not yet retrieved SIB or displacement bytes */
+		if (!ctx_update(&ctx, &pc, skip_len, pg_structs))
+			goto error_noinst;
+
+		/* retrieve immediate value */
 		for (n = 0; n < IMMEDIATE_SIZE; n++) {
 			if (!ctx_update(&ctx, &pc, 1, pg_structs))
 				goto error_noinst;
 			inst.out_val |= (unsigned long)*ctx.inst << (n * 8);
 		}
-	else if (does_write)
-		inst.out_val = guest_regs->by_index[inst.in_reg_num];
+
+		/* sign-extend immediate if the target is 64-bit */
+		if (has_rex_w)
+			inst.out_val = (s64)(s32)inst.out_val;
+	} else {
+		inst.inst_len += skip_len;
+		if (does_write)
+			inst.out_val = guest_regs->by_index[inst.in_reg_num];
+	}
 
 final:
 	if (does_write != is_write)
 		goto error_inconsitent;
+
+	inst.inst_len += ctx.count;
 
 	return inst;
 
@@ -210,7 +237,7 @@ error_noinst:
 
 error_unsupported:
 	panic_printk("FATAL: unsupported instruction "
-		     "(0x%02x [0x%02x] 0x%02x 0x%02x)\n",
+		     "(0x%02x 0x%02x 0x%02x 0x%02x)\n",
 		     op[0].raw, op[1].raw, op[2].raw, op[3].raw);
 	goto error;
 
@@ -220,9 +247,4 @@ error_inconsitent:
 error:
 	inst.inst_len = 0;
 	return inst;
-}
-
-unsigned int arch_mmio_count_regions(struct cell *cell)
-{
-	return ioapic_mmio_count_regions(cell) + iommu_mmio_count_regions(cell);
 }

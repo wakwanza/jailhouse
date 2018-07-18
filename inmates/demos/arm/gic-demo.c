@@ -12,8 +12,8 @@
  * the COPYING file in the top-level directory.
  */
 
-#include <mach.h>
 #include <inmate.h>
+#include <gic.h>
 
 #define BEATS_PER_SEC		10
 
@@ -68,6 +68,5 @@ void inmate_main(void)
 	led_reg = (void *)(unsigned long)cmdline_parse_int("led-reg", 0);
 	led_pin = cmdline_parse_int("led-pin", 0);
 
-	while (1)
-		asm volatile("wfi" : : : "memory");
+	halt();
 }

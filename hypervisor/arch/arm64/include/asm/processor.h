@@ -24,9 +24,11 @@
 
 #ifndef __ASSEMBLY__
 
-struct registers {
-	unsigned long exit_reason;
-	unsigned long usr[NUM_USR_REGS];
+union registers {
+	struct {
+		unsigned long exit_reason;
+		unsigned long usr[NUM_USR_REGS];
+	};
 };
 
 #define ARM_PARKING_CODE		\
@@ -50,8 +52,6 @@ static inline void memory_barrier(void)
 static inline void memory_load_barrier(void)
 {
 }
-
-#define tlb_flush_guest()	asm volatile("tlbi vmalls12e1\n")
 
 #endif /* !__ASSEMBLY__ */
 

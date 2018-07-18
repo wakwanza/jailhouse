@@ -48,17 +48,14 @@ int arch_unmap_memory_region(struct cell *cell,
 			      PAGING_COHERENT);
 }
 
-unsigned long arch_paging_gphys2phys(struct per_cpu *cpu_data,
-				     unsigned long gphys, unsigned long flags)
+unsigned long arch_paging_gphys2phys(unsigned long gphys, unsigned long flags)
 {
 	/* Translate IPA->PA */
-	return paging_virt2phys(&cpu_data->cell->arch.mm, gphys, flags);
+	return paging_virt2phys(&this_cell()->arch.mm, gphys, flags);
 }
 
 void arm_cell_dcaches_flush(struct cell *cell, enum dcache_flush flush)
 {
-	unsigned long vaddr = TEMPORARY_MAPPING_BASE +
-		this_cpu_id() * PAGE_SIZE * NUM_TEMPORARY_PAGES;
 	unsigned long region_addr, region_size, size;
 	struct jailhouse_memory const *mem;
 	unsigned int n;
@@ -75,11 +72,12 @@ void arm_cell_dcaches_flush(struct cell *cell, enum dcache_flush flush)
 				   NUM_TEMPORARY_PAGES * PAGE_SIZE);
 
 			/* cannot fail, mapping area is preallocated */
-			paging_create(&hv_paging_structs, region_addr, size,
-				      vaddr, PAGE_DEFAULT_FLAGS,
-				      PAGING_NON_COHERENT);
+			paging_create(&this_cpu_data()->pg_structs, region_addr,
+				      size, TEMPORARY_MAPPING_BASE,
+				      PAGE_DEFAULT_FLAGS, PAGING_NON_COHERENT);
 
-			arm_dcaches_flush((void *)vaddr, size, flush);
+			arm_dcaches_flush((void *)TEMPORARY_MAPPING_BASE, size,
+					  flush);
 
 			region_addr += size;
 			region_size -= size;
@@ -97,7 +95,7 @@ int arm_paging_cell_init(struct cell *cell)
 
 	cell->arch.mm.root_paging = cell_paging;
 	cell->arch.mm.root_table =
-		page_alloc_aligned(&mem_pool, ARM_CELL_ROOT_PT_SZ);
+		page_alloc_aligned(&mem_pool, CELL_ROOT_PT_PAGES);
 
 	if (!cell->arch.mm.root_table)
 		return -ENOMEM;
@@ -107,7 +105,7 @@ int arm_paging_cell_init(struct cell *cell)
 
 void arm_paging_cell_destroy(struct cell *cell)
 {
-	page_free(&mem_pool, cell->arch.mm.root_table, ARM_CELL_ROOT_PT_SZ);
+	page_free(&mem_pool, cell->arch.mm.root_table, CELL_ROOT_PT_PAGES);
 }
 
 void arm_paging_vcpu_init(struct paging_structures *pg_structs)

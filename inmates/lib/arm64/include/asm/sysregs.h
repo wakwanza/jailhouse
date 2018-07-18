@@ -41,6 +41,48 @@
 
 #ifndef __ASSEMBLY__
 
+#define SCTLR_EL1_I	(1 << 12)
+#define SCTLR_EL1_C	(1 << 2)
+#define SCTLR_EL1_M	(1 << 0)
+
+#define SCTLR		SCTLR_EL1
+
+/* Enable MMU, data+instruction caches */
+#define SCTLR_MMU_CACHES	(SCTLR_EL1_I | SCTLR_EL1_C | SCTLR_EL1_M)
+
+#define TCR_EL1_T0SZ_25		25
+#define TCR_EL1_IRGN0_WBWAC	(0x1 << 8)
+#define TCR_EL1_ORGN0_WBWAC	(0x1 << 10)
+#define TCR_EL1_SH0_IS		(0x3 << 12)
+#define TCR_EL1_TG0_4K		(0x0 << 14)
+#define TCR_EL1_IPC_256TB	(0x5UL << 32)
+
+/*
+ * IPA size 48bit (256TiB), 4KiB granularity, and set inner/outer caches to
+ * write-back write-allocate cacheable and shareability attribute to inner
+ * shareable
+ */
+#define TRANSL_CONT_REG TCR_EL1
+#define TRANSL_CONT_REG_SETTINGS \
+	TCR_EL1_IPC_256TB | TCR_EL1_TG0_4K | TCR_EL1_SH0_IS | \
+	TCR_EL1_ORGN0_WBWAC | TCR_EL1_IRGN0_WBWAC | TCR_EL1_T0SZ_25
+
+#define MAIR	MAIR_EL1
+
+#define TTBR0	TTBR0_EL1
+
+#define MPIDR	MPIDR_EL1
+
+#define MPIDR_LEVEL_BITS_SHIFT	3
+#define MPIDR_LEVEL_BITS	(1 << MPIDR_LEVEL_BITS_SHIFT)
+#define MPIDR_LEVEL_MASK	((1 << MPIDR_LEVEL_BITS) - 1)
+
+#define MPIDR_LEVEL_SHIFT(level) \
+        (((1 << (level)) >> 1) << MPIDR_LEVEL_BITS_SHIFT)
+
+#define MPIDR_AFFINITY_LEVEL(mpidr, level) \
+        (((mpidr) >> MPIDR_LEVEL_SHIFT(level)) & MPIDR_LEVEL_MASK)
+
 #define __stringify_1(x...)     #x
 #define __stringify(x...)       __stringify_1(x)
 
@@ -51,5 +93,7 @@
 
 #define arm_read_sysreg(sysreg, val) \
 	asm volatile ("mrs	%0,  "__stringify(sysreg)"\n" : "=r"((val)))
+
+#include <asm/sysregs_common.h>
 
 #endif /* __ASSEMBLY__ */

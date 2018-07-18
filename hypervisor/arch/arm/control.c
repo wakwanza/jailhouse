@@ -17,19 +17,15 @@
 #include <jailhouse/string.h>
 #include <asm/control.h>
 #include <asm/irqchip.h>
-#include <asm/mach.h>
 #include <asm/psci.h>
 #include <asm/sysregs.h>
 
 void arm_cpu_reset(unsigned long pc)
 {
-	struct per_cpu *cpu_data = this_cpu_data();
-	struct cell *cell = cpu_data->cell;
-	struct registers *regs = guest_regs(cpu_data);
 	u32 sctlr;
 
 	/* Wipe all banked and usr regs */
-	memset(regs, 0, sizeof(struct registers));
+	memset(&this_cpu_data()->guest_regs, 0, sizeof(union registers));
 
 	arm_write_banked_reg(SP_usr, 0);
 	arm_write_banked_reg(SP_svc, 0);
@@ -92,11 +88,11 @@ void arm_cpu_reset(unsigned long pc)
 	arm_write_banked_reg(ELR_hyp, pc);
 
 	/* transfer the context that may have been passed to PSCI_CPU_ON */
-	regs->usr[1] = cpu_data->cpu_on_context;
+	this_cpu_data()->guest_regs.usr[1] = this_cpu_public()->cpu_on_context;
 
-	arm_paging_vcpu_init(&cell->arch.mm);
+	arm_paging_vcpu_init(&this_cell()->arch.mm);
 
-	irqchip_cpu_reset(cpu_data);
+	irqchip_cpu_reset(this_cpu_data());
 }
 
 #ifdef CONFIG_CRASH_CELL_ON_PANIC
@@ -105,102 +101,3 @@ void arch_panic_park(void)
 	arm_write_banked_reg(ELR_hyp, 0);
 }
 #endif
-
-static void arch_dump_exit(struct registers *regs, const char *reason)
-{
-	unsigned long pc;
-	unsigned int n;
-
-	arm_read_banked_reg(ELR_hyp, pc);
-	panic_printk("Unhandled HYP %s exit at 0x%lx\n", reason, pc);
-	for (n = 0; n < NUM_USR_REGS; n++)
-		panic_printk("r%d:%s 0x%08lx%s", n, n < 10 ? " " : "",
-			     regs->usr[n], n % 4 == 3 ? "\n" : "  ");
-	panic_printk("\n");
-}
-
-static void arch_dump_abt(bool is_data)
-{
-	u32 hxfar;
-	u32 esr;
-
-	arm_read_sysreg(ESR_EL2, esr);
-	if (is_data)
-		arm_read_sysreg(HDFAR, hxfar);
-	else
-		arm_read_sysreg(HIFAR, hxfar);
-
-	panic_printk("Physical address: 0x%08x ESR: 0x%08x\n", hxfar, esr);
-}
-
-struct registers* arch_handle_exit(struct per_cpu *cpu_data,
-				   struct registers *regs)
-{
-	cpu_data->stats[JAILHOUSE_CPU_STAT_VMEXITS_TOTAL]++;
-
-	switch (regs->exit_reason) {
-	case EXIT_REASON_IRQ:
-		irqchip_handle_irq(cpu_data);
-		break;
-	case EXIT_REASON_TRAP:
-		arch_handle_trap(cpu_data, regs);
-		break;
-
-	case EXIT_REASON_UNDEF:
-		arch_dump_exit(regs, "undef");
-		panic_stop();
-	case EXIT_REASON_DABT:
-		arch_dump_exit(regs, "data abort");
-		arch_dump_abt(true);
-		panic_stop();
-	case EXIT_REASON_PABT:
-		arch_dump_exit(regs, "prefetch abort");
-		arch_dump_abt(false);
-		panic_stop();
-	case EXIT_REASON_HVC:
-		arch_dump_exit(regs, "hvc");
-		panic_stop();
-	case EXIT_REASON_FIQ:
-		arch_dump_exit(regs, "fiq");
-		panic_stop();
-	default:
-		arch_dump_exit(regs, "unknown");
-		panic_stop();
-	}
-
-	return regs;
-}
-
-int arch_cell_create(struct cell *cell)
-{
-	int err;
-
-	err = arm_paging_cell_init(cell);
-	if (err)
-		return err;
-
-	err = irqchip_cell_init(cell);
-	if (err) {
-		arm_paging_cell_destroy(cell);
-		return err;
-	}
-
-	mach_cell_init(cell);
-
-	return 0;
-}
-
-void arch_cell_destroy(struct cell *cell)
-{
-	unsigned int cpu;
-
-	arm_cell_dcaches_flush(cell, DCACHE_INVALIDATE);
-
-	for_each_cpu(cpu, cell->cpu_set)
-		per_cpu(cpu)->cpu_on_entry = PSCI_INVALID_ADDRESS;
-
-	mach_cell_exit(cell);
-	irqchip_cell_exit(cell);
-
-	arm_paging_cell_destroy(cell);
-}

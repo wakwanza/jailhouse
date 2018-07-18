@@ -14,6 +14,7 @@
 #include <jailhouse/mmio.h>
 #include <jailhouse/printk.h>
 #include <jailhouse/string.h>
+#include <jailhouse/unit.h>
 #include <asm/apic.h>
 #include <asm/ioapic.h>
 #include <asm/iommu.h>
@@ -45,6 +46,11 @@ enum ioapic_handover {PINS_ACTIVE, PINS_MASKED};
 
 static struct phys_ioapic phys_ioapics[IOAPIC_MAX_CHIPS];
 static unsigned int num_phys_ioapics;
+
+static unsigned int ioapic_mmio_count_regions(struct cell *cell)
+{
+	return cell->config->num_irqchips;
+}
 
 static u32 ioapic_reg_read(struct phys_ioapic *ioapic, unsigned int reg)
 {
@@ -192,19 +198,6 @@ static void ioapic_mask_cell_pins(struct cell_ioapic *ioapic,
 	}
 }
 
-int ioapic_init(void)
-{
-	int err;
-
-	err = ioapic_cell_init(&root_cell);
-	if (err)
-		return err;
-
-	ioapic_prepare_handover();
-
-	return 0;
-}
-
 void ioapic_prepare_handover(void)
 {
 	struct cell_ioapic *ioapic;
@@ -341,7 +334,9 @@ invalid_access:
 	return MMIO_ERROR;
 }
 
-int ioapic_cell_init(struct cell *cell)
+static void ioapic_cell_exit(struct cell *cell);
+
+static int ioapic_cell_init(struct cell *cell)
 {
 	const struct jailhouse_irqchip *irqchip =
 		jailhouse_cell_irqchips(cell->config);
@@ -405,7 +400,7 @@ void ioapic_cell_reset(struct cell *cell)
 		ioapic_mask_cell_pins(ioapic, PINS_MASKED);
 }
 
-void ioapic_cell_exit(struct cell *cell)
+static void ioapic_cell_exit(struct cell *cell)
 {
 	struct cell_ioapic *ioapic, *root_ioapic;
 	const struct jailhouse_irqchip *irqchip;
@@ -459,7 +454,20 @@ void ioapic_config_commit(struct cell *cell_added_removed)
 		}
 }
 
-void ioapic_shutdown(void)
+static int ioapic_init(void)
+{
+	int err;
+
+	err = ioapic_cell_init(&root_cell);
+	if (err)
+		return err;
+
+	ioapic_prepare_handover();
+
+	return 0;
+}
+
+static void ioapic_shutdown(void)
 {
 	union ioapic_redir_entry *shadow_table;
 	struct phys_ioapic *phys_ioapic;
@@ -477,3 +485,5 @@ void ioapic_shutdown(void)
 				shadow_table[index / 2].raw[index % 2]);
 	}
 }
+
+DEFINE_UNIT(ioapic, "IOAPIC");

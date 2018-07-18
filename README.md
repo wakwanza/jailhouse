@@ -39,6 +39,10 @@ Source code:
  - https://github.com/siemens/jailhouse.git
  - git@github.com:siemens/jailhouse.git
 
+Demo and testing images:
+
+ - https://github.com/siemens/jailhouse-images
+
 Frequently Asked Questions (FAQ):
 
  - See [FAQ file](FAQ.md)
@@ -120,15 +124,20 @@ Hardware requirements (preliminary)
     - ARM Versatile Express with Cortex-A15 or A7 cores
       (includes ARM Fast Model)
 
+    - emtrion emCON-RZ/G1x series based on Renesas RZ/G ([see more](Documentation/setup-on-emtrion-emcon-rz-boards.md))
+
   - Supported ARM64 boards:
 
     - AMD Seattle / SoftIron Overdrive 3000
 
     - LeMaker HiKey
 
-    - NVIDIA Jetson TX1
+    - NVIDIA Jetson TX1 and TX2
 
     - Xilinx ZCU102 (ZynqMP evaluation board)
+
+    - NXP MCIMX8M-EVK
+
 
 Software requirements
 ---------------------
@@ -149,12 +158,12 @@ Software requirements
     additional cell. This currently has to be pre-allocated during boot-up.
     On x86 this is typically done by adding
 
-        memmap=66M$0x3b000000
+        memmap=82M$0x3a000000
 
     as parameter to the command line of the virtual machine's kernel. Note that
     if you plan to put this parameter in GRUB2 variables in /etc/default/grub,
     then you will need three escape characters before the dollar
-    (e.g. ```GRUB_CMDLINE_LINUX_DEFAULT="memmap=66M\\\$0x3b000000"```).
+    (e.g. ```GRUB_CMDLINE_LINUX_DEFAULT="memmap=82M\\\$0x3a000000"```).
 
 #### ARM architecture:
 
@@ -170,7 +179,7 @@ Software requirements
     additional cell. This currently has to be pre-allocated during boot-up.
     On ARM this can be obtained by reducing the amount of memory seen by the
     kernel (through the `mem=` kernel boot parameter) or by modifying the
-    Device Tree.
+    Device Tree (i.e. the `reserved-memory` node).
 
 
 Build & Installation
@@ -219,8 +228,8 @@ the following command:
     jailhouse config create sysconfig.c
 
 In order to translate this into the required binary form, place this file in
-the configs/ directory. The build system will pick up every .c file from there
-and generate a corresponding .cell file.
+the configs/x86/ directory. The build system will pick up every .c file from
+there and generate a corresponding .cell file.
 
 On x86 the hardware capabilities can be validated by running
 
@@ -238,15 +247,19 @@ root cell.
 
 Configurations for additional (non-root) cells currently require manual
 creation. To study the structures, use one of the demo cell configurations files
-as reference, e.g. configs/apic-demo.c or configs/e1000-demo.c.
+as reference, e.g. configs/x86/apic-demo.c or configs/x86/e1000-demo.c.
 
 
 x86 Demonstration in QEMU/KVM
 -----------------------------
 
+**NOTE**: You can also build and execute the following demo steps with the
+help of the jailhouse-images side project at
+https://github.com/siemens/jailhouse-images.
+
 The included system configuration qemu-x86.c can be used to run Jailhouse in
 QEMU/KVM virtual machine on x86 hosts (Intel and AMD are supported). Currently
-it requires Linux 4.4 or newer on the host side. QEMU version 2.7 or newer is
+it requires Linux 4.4 or newer on the host side. QEMU version 2.8 or newer is
 required.
 
 You also need a Linux guest image with a recent kernel (tested with >= 3.9) and
@@ -325,7 +338,7 @@ commands:
 
     jailhouse cell create /path/to/pci-demo.cell
     jailhouse cell load pci-demo /path/to/pci-demo.bin \
-        -s "con-base=0x2f8" -a 0x100
+        -s "con-base=0x2f8" -a 0x1000
     jailhouse cell start pci-demo
 
 The pci-demo will use the second serial port provided by QEMU. You will find
@@ -338,7 +351,7 @@ reload and restart the tiny-demo, issue the following commands:
 
     jailhouse cell start apic-demo
     jailhouse cell load pci-demo /path/to/pci-demo.bin \
-        -s "con-base=0x2f8" -a 0x100
+        -s "con-base=0x2f8" -a 0x1000
     jailhouse cell start pci-demo
 
 Finally, Jailhouse is can be stopped completely again:

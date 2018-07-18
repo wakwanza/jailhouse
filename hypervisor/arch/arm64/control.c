@@ -20,9 +20,6 @@
 
 void arm_cpu_reset(unsigned long pc)
 {
-	struct per_cpu *cpu_data = this_cpu_data();
-	struct registers *regs = guest_regs(cpu_data);
-
 	/* put the cpu in a reset state */
 	/* AARCH64_TODO: handle big endian support */
 	arm_write_sysreg(SPSR_EL2, RESET_PSR);
@@ -31,7 +28,7 @@ void arm_cpu_reset(unsigned long pc)
 	arm_write_sysreg(PMCR_EL0, 0);
 
 	/* wipe any other state to avoid leaking information accross cells */
-	memset(regs, 0, sizeof(struct registers));
+	memset(&this_cpu_data()->guest_regs, 0, sizeof(union registers));
 
 	/* AARCH64_TODO: wipe floating point registers */
 
@@ -74,11 +71,11 @@ void arm_cpu_reset(unsigned long pc)
 	arm_write_sysreg(ELR_EL2, pc);
 
 	/* transfer the context that may have been passed to PSCI_CPU_ON */
-	regs->usr[1] = cpu_data->cpu_on_context;
+	this_cpu_data()->guest_regs.usr[1] = this_cpu_public()->cpu_on_context;
 
-	arm_paging_vcpu_init(&cpu_data->cell->arch.mm);
+	arm_paging_vcpu_init(&this_cell()->arch.mm);
 
-	irqchip_cpu_reset(cpu_data);
+	irqchip_cpu_reset(this_cpu_data());
 }
 
 #ifdef CONFIG_CRASH_CELL_ON_PANIC
@@ -87,33 +84,3 @@ void arch_panic_park(void)
 	arm_write_sysreg(ELR_EL2, 0);
 }
 #endif
-
-int arch_cell_create(struct cell *cell)
-{
-	int err;
-
-	err = arm_paging_cell_init(cell);
-	if (err)
-		return err;
-
-	err = irqchip_cell_init(cell);
-	if (err)
-		arm_paging_cell_destroy(cell);
-
-	return err;
-}
-
-void arch_cell_destroy(struct cell *cell)
-{
-	unsigned int cpu;
-
-	arm_cell_dcaches_flush(cell, DCACHE_INVALIDATE);
-
-	/* All CPUs are handed back to the root cell in suspended mode. */
-	for_each_cpu(cpu, cell->cpu_set)
-		per_cpu(cpu)->cpu_on_entry = PSCI_INVALID_ADDRESS;
-
-	irqchip_cell_exit(cell);
-
-	arm_paging_cell_destroy(cell);
-}

@@ -23,7 +23,7 @@
 #include <asm/i8042.h>
 #include <asm/ioapic.h>
 #include <asm/pci.h>
-#include <asm/percpu.h>
+#include <jailhouse/percpu.h>
 #include <asm/vcpu.h>
 
 static u8 __attribute__((aligned(PAGE_SIZE))) parking_code[PAGE_SIZE] = {
@@ -32,8 +32,6 @@ static u8 __attribute__((aligned(PAGE_SIZE))) parking_code[PAGE_SIZE] = {
 	0xeb,
 	0xfc  /*    jmp 1b */
 };
-
-struct paging_structures parking_pt;
 
 int vcpu_early_init(void)
 {
@@ -44,9 +42,6 @@ int vcpu_early_init(void)
 		return err;
 
 	/* Map guest parking code (shared between cells and CPUs) */
-	parking_pt.root_table = page_alloc(&mem_pool, 1);
-	if (!parking_pt.root_table)
-		return -ENOMEM;
 	return paging_create(&parking_pt, paging_hvirt2phys(parking_code),
 			     PAGE_SIZE, 0, PAGE_READONLY_FLAGS | PAGE_FLAG_US,
 			     PAGING_NON_COHERENT);
@@ -156,20 +151,17 @@ void vcpu_cell_exit(struct cell *cell)
 void vcpu_handle_hypercall(void)
 {
 	union registers *guest_regs = &this_cpu_data()->guest_regs;
+	u16 cs_attr = vcpu_vendor_get_cs_attr();
+	bool long_mode = (vcpu_vendor_get_efer() & EFER_LMA) &&
+		(cs_attr & VCPU_CS_L);
+	unsigned long arg_mask = long_mode ? (u64)-1 : (u32)-1;
 	unsigned long code = guest_regs->rax;
-	struct vcpu_execution_state x_state;
-	unsigned long arg_mask;
-	bool long_mode;
+	unsigned int cpu_id = this_cpu_id();
 
 	vcpu_skip_emulated_instruction(X86_INST_LEN_HYPERCALL);
 
-	vcpu_vendor_get_execution_state(&x_state);
-
-	long_mode = !!(x_state.efer & EFER_LMA);
-	arg_mask = long_mode ? (u64)-1 : (u32)-1;
-
-	if ((!long_mode && (x_state.rflags & X86_RFLAGS_VM)) ||
-	    (x_state.cs & 3) != 0) {
+	if ((!long_mode && (vcpu_vendor_get_rflags() & X86_RFLAGS_VM)) ||
+	    (cs_attr & VCPU_CS_DPL_MASK) != 0) {
 		guest_regs->rax = -EPERM;
 		return;
 	}
@@ -178,11 +170,28 @@ void vcpu_handle_hypercall(void)
 				    guest_regs->rsi & arg_mask);
 	if (guest_regs->rax == -ENOSYS)
 		printk("CPU %d: Unknown hypercall %ld, RIP: 0x%016llx\n",
-		       this_cpu_id(), code,
-		       x_state.rip - X86_INST_LEN_HYPERCALL);
+		       cpu_id, code,
+		       vcpu_vendor_get_rip() - X86_INST_LEN_HYPERCALL);
 
-	if (code == JAILHOUSE_HC_DISABLE && guest_regs->rax == 0)
+	if (code == JAILHOUSE_HC_DISABLE && guest_regs->rax == 0) {
+		/*
+		 * Restore full per_cpu region access so that we can switch
+		 * back to the common stack mapping and to Linux page tables.
+		 */
+		paging_map_all_per_cpu(cpu_id, true);
+
+		/*
+		 * Switch the stack back to the common mapping.
+		 * Preexisting pointers to the stack remain valid until we also
+		 * switch the page tables in arch_cpu_restore.
+		 */
+		asm volatile(
+			"sub %0,%%rsp"
+			: : "g" (LOCAL_CPU_BASE -
+				 (unsigned long)per_cpu(cpu_id)));
+
 		vcpu_deactivate_vmm();
+	}
 }
 
 bool vcpu_handle_io_access(void)
@@ -221,15 +230,13 @@ bool vcpu_handle_mmio_access(void)
 	struct guest_paging_structures pg_structs;
 	struct mmio_access mmio = {.size = 0};
 	struct vcpu_mmio_intercept intercept;
-	struct vcpu_execution_state x_state;
 	struct mmio_instruction inst;
 
-	vcpu_vendor_get_execution_state(&x_state);
 	vcpu_vendor_get_mmio_intercept(&intercept);
 
 	vcpu_get_guest_paging_structs(&pg_structs);
 
-	inst = x86_mmio_parse(x_state.rip, &pg_structs, intercept.is_write);
+	inst = x86_mmio_parse(&pg_structs, intercept.is_write);
 	if (!inst.inst_len)
 		goto invalid_access;
 
@@ -337,7 +344,7 @@ void vcpu_handle_cpuid(void)
 	union registers *guest_regs = &this_cpu_data()->guest_regs;
 	u32 function = guest_regs->rax;
 
-	this_cpu_data()->stats[JAILHOUSE_CPU_STAT_VMEXITS_CPUID]++;
+	this_cpu_data()->public.stats[JAILHOUSE_CPU_STAT_VMEXITS_CPUID]++;
 
 	switch (function) {
 	case JAILHOUSE_CPUID_SIGNATURE:

@@ -37,7 +37,7 @@
  *
  * TODO: implement larger PARange support for AArch32
  */
-#define ARM_CELL_ROOT_PT_SZ	1
+#define CELL_ROOT_PT_PAGES	1
 
 #if MAX_PAGE_TABLE_LEVELS < 3
 #define T0SZ			0
@@ -156,6 +156,7 @@
 				| S1_PTE_ACCESS_EL0)
 
 /* Macros used by the core, only for the EL2 stage-1 mappings */
+#define PAGE_FLAG_FRAMEBUFFER	S1_PTE_FLAG_DEVICE
 #define PAGE_FLAG_DEVICE	S1_PTE_FLAG_DEVICE
 #define PAGE_DEFAULT_FLAGS	(S1_DEFAULT_FLAGS | S1_PTE_ACCESS_RW)
 #define PAGE_READONLY_FLAGS	(S1_DEFAULT_FLAGS | S1_PTE_ACCESS_RO)
@@ -164,10 +165,14 @@
 
 #define INVALID_PHYS_ADDR	(~0UL)
 
-#define REMAP_BASE		0x00100000UL
-#define NUM_REMAP_BITMAP_PAGES	4
-
+/**
+ * Location of per-CPU temporary mapping region in hypervisor address space.
+ */
+#define TEMPORARY_MAPPING_BASE	0x40000000UL
 #define NUM_TEMPORARY_PAGES	16
+
+#define REMAP_BASE		0xf8000000UL
+#define NUM_REMAP_BITMAP_PAGES	4
 
 #ifndef __ASSEMBLY__
 

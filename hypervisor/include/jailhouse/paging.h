@@ -13,8 +13,6 @@
 #ifndef _JAILHOUSE_PAGING_H
 #define _JAILHOUSE_PAGING_H
 
-#include <jailhouse/entry.h>
-#include <jailhouse/types.h>
 #include <asm/paging.h>
 
 /**
@@ -33,10 +31,14 @@
 /** Count number of pages for given size (round up). */
 #define PAGES(s)		(((s) + PAGE_SIZE-1) / PAGE_SIZE)
 
-/**
- * Location of per-CPU temporary mapping region in hypervisor address space.
- */
-#define TEMPORARY_MAPPING_BASE	REMAP_BASE
+/** Location of per-CPU data structure in hypervisor address space. */
+#define LOCAL_CPU_BASE		(TEMPORARY_MAPPING_BASE + \
+				 NUM_TEMPORARY_PAGES * PAGE_SIZE)
+
+#ifndef __ASSEMBLY__
+
+#include <jailhouse/entry.h>
+#include <jailhouse/types.h>
 
 /** Page pool state. */
 struct page_pool {
@@ -152,6 +154,8 @@ struct paging {
 
 /** Describes the root of hierarchical paging structures. */
 struct paging_structures {
+	/** True if used for hypervisor itself. */
+	bool hv_paging;
 	/** Pointer to array of paging parameters and callbacks, first element
 	 * describing the root level, NULL if paging is disabled. */
 	const struct paging *root_paging;
@@ -180,6 +184,7 @@ extern struct page_pool mem_pool;
 extern struct page_pool remap_pool;
 
 extern struct paging_structures hv_paging_structs;
+extern struct paging_structures parking_pt;
 
 unsigned long paging_get_phys_invalid(pt_entry_t pte, unsigned long virt);
 
@@ -222,7 +227,6 @@ unsigned long paging_virt2phys(const struct paging_structures *pg_structs,
 
 /**
  * Translate guest-physical (cell) address into host-physical address.
- * @param cpu_data	CPU to use for the translation.
  * @param gphys		Guest-physical address to translate.
  * @param flags		Access flags to validate during the translation.
  *
@@ -234,12 +238,11 @@ unsigned long paging_virt2phys(const struct paging_structures *pg_structs,
  * @see paging_hvirt2phys
  * @see paging_virt2phys
  */
-unsigned long arch_paging_gphys2phys(struct per_cpu *cpu_data,
-				     unsigned long gphys, unsigned long flags);
+unsigned long arch_paging_gphys2phys(unsigned long gphys, unsigned long flags);
 
 int paging_create(const struct paging_structures *pg_structs,
-		    unsigned long phys, unsigned long size, unsigned long virt,
-		    unsigned long flags, enum paging_coherent coherent);
+		  unsigned long phys, unsigned long size, unsigned long virt,
+		  unsigned long flags, enum paging_coherent coherent);
 int paging_destroy(const struct paging_structures *pg_structs,
 		   unsigned long virt, unsigned long size,
 		   enum paging_coherent coherent);
@@ -247,9 +250,14 @@ int paging_destroy(const struct paging_structures *pg_structs,
 void *paging_map_device(unsigned long phys, unsigned long size);
 void paging_unmap_device(unsigned long phys, void *virt, unsigned long size);
 
+int paging_create_hvpt_link(const struct paging_structures *pg_dest_structs,
+			    unsigned long virt);
+
 void *paging_get_guest_pages(const struct guest_paging_structures *pg_structs,
 			     unsigned long gaddr, unsigned int num,
 			     unsigned long flags);
+
+int paging_map_all_per_cpu(unsigned int cpu, bool enable);
 
 int paging_init(void);
 
@@ -340,6 +348,8 @@ void paging_dump_stats(const char *when);
  *
  * @see arch_paging_flush_page_tlbs
  */
+
+#endif /* !__ASSEMBLY__ */
 
 /** @} */
 #endif /* !_JAILHOUSE_PAGING_H */

@@ -17,7 +17,7 @@
 #include <jailhouse/cell-config.h>
 #include <jailhouse/entry.h>
 #include <jailhouse/paging.h>
-#include <asm/percpu.h>
+#include <jailhouse/percpu.h>
 #include <asm/processor.h>
 
 #define X86_CR0_HOST_STATE \
@@ -28,13 +28,6 @@
 struct vcpu_io_bitmap {
 	u8 *data;
 	u32 size;
-};
-
-struct vcpu_execution_state {
-	u64 efer;
-	u64 rflags;
-	u16 cs;
-	u64 rip;
 };
 
 struct vcpu_io_intercept {
@@ -49,8 +42,6 @@ struct vcpu_mmio_intercept {
 	u64 phys_addr;
 	bool is_write;
 };
-
-extern struct paging_structures parking_pt;
 
 int vcpu_early_init(void);
 
@@ -69,7 +60,7 @@ void vcpu_vendor_cell_exit(struct cell *cell);
 int vcpu_init(struct per_cpu *cpu_data);
 void vcpu_exit(struct per_cpu *cpu_data);
 
-void __attribute__((noreturn)) vcpu_activate_vmm(struct per_cpu *cpu_data);
+void __attribute__((noreturn)) vcpu_activate_vmm(void);
 void __attribute__((noreturn)) vcpu_deactivate_vmm(void);
 
 void vcpu_handle_exit(struct per_cpu *cpu_data);
@@ -100,7 +91,15 @@ void vcpu_skip_emulated_instruction(unsigned int inst_len);
 void vcpu_vendor_get_cell_io_bitmap(struct cell *cell,
 		                    struct vcpu_io_bitmap *out);
 
-void vcpu_vendor_get_execution_state(struct vcpu_execution_state *x_state);
+#define VCPU_CS_DPL_MASK	BIT_MASK(6, 5)
+#define VCPU_CS_L		(1 << 13)
+#define VCPU_CS_DB		(1 << 14)
+
+u64 vcpu_vendor_get_efer(void);
+u64 vcpu_vendor_get_rflags(void);
+u64 vcpu_vendor_get_rip(void);
+u16 vcpu_vendor_get_cs_attr(void);
+
 void vcpu_vendor_get_io_intercept(struct vcpu_io_intercept *io);
 void vcpu_vendor_get_mmio_intercept(struct vcpu_mmio_intercept *mmio);
 

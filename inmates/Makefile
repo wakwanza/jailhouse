@@ -17,6 +17,7 @@ export INMATES_LIB
 
 INCLUDES := -I$(INMATES_LIB) \
 	    -I$(src)/../include/arch/$(SRCARCH) \
+	    -I$(src)/lib/include \
 	    -I$(src)/../include
 
 ifeq ($(subst arm64,arm,$(SRCARCH)),arm)
@@ -27,7 +28,9 @@ LINUXINCLUDE  := $(INCLUDES)
 KBUILD_CFLAGS := -g -Os -Wall -Wstrict-prototypes -Wtype-limits \
 		 -Wmissing-declarations -Wmissing-prototypes \
 		 -fno-strict-aliasing -fomit-frame-pointer -fno-pic \
-		 -fno-common -fno-stack-protector -ffreestanding
+		 -fno-common -fno-stack-protector -ffreestanding \
+		 -ffunction-sections \
+		 -D__LINUX_COMPILER_TYPES_H
 ifneq ($(wildcard $(INC_CONFIG_H)),)
 KBUILD_CFLAGS += -include $(INC_CONFIG_H)
 endif
@@ -35,7 +38,8 @@ endif
 OBJCOPYFLAGS := -O binary
 LDFLAGS += --gc-sections -T
 
-subdir-y := lib/$(SRCARCH) demos/$(SRCARCH) tools/$(SRCARCH)
+subdir-y := lib/$(SRCARCH) demos/$(SRCARCH) tests/$(SRCARCH) tools/$(SRCARCH)
 
-# demos and tools depend on the library
-$(obj)/demos/$(SRCARCH) $(obj)/tools/$(SRCARCH): $(obj)/lib/$(SRCARCH)
+# demos, tests and tools depend on the library
+$(obj)/demos/$(SRCARCH) $(obj)/tests/$(SRCARCH) $(obj)/tools/$(SRCARCH): \
+	$(obj)/lib/$(SRCARCH)

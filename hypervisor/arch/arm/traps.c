@@ -51,7 +51,7 @@ static const unsigned short cc_map[16] = {
 static bool arch_failed_condition(struct trap_context *ctx)
 {
 	u32 class = HSR_EC(ctx->hsr);
-	u32 icc = HSR_ICC(ctx->hsr);
+	u32 iss = HSR_ISS(ctx->hsr);
 	u32 cpsr, flags, cond;
 
 	arm_read_banked_reg(SPSR_hyp, cpsr);
@@ -65,8 +65,8 @@ static bool arch_failed_condition(struct trap_context *ctx)
 		return false;
 
 	/* Is condition field valid? */
-	if (icc & HSR_ICC_CV_BIT) {
-		cond = HSR_ICC_COND(icc);
+	if (iss & HSR_ISS_CV_BIT) {
+		cond = HSR_ISS_COND(iss);
 	} else {
 		/* This can happen in Thumb mode: examine IT state. */
 		unsigned long it = PSR_IT(cpsr);
@@ -263,10 +263,13 @@ static int arch_handle_hvc(struct trap_context *ctx)
 	unsigned long *regs = ctx->regs;
 	unsigned long code = regs[0];
 
+	if (HSR_ISS(ctx->hsr) != JAILHOUSE_HVC_CODE)
+		return TRAP_FORBIDDEN;
+
 	regs[0] = hypercall(code, regs[1], regs[2]);
 
 	if (code == JAILHOUSE_HC_DISABLE && regs[0] == 0)
-		arch_shutdown_self(this_cpu_data());
+		arch_shutdown_self(per_cpu(this_cpu_id()));
 
 	return TRAP_HANDLED;
 }
@@ -288,7 +291,7 @@ static int arch_handle_cp15_32(struct trap_context *ctx)
 	match;								\
 })
 
-	this_cpu_data()->stats[JAILHOUSE_CPU_STAT_VMEXITS_CP15]++;
+	this_cpu_public()->stats[JAILHOUSE_CPU_STAT_VMEXITS_CP15]++;
 
 	if (!read)
 		access_cell_reg(ctx, rt, &val, true);
@@ -371,7 +374,7 @@ static int arch_handle_cp15_64(struct trap_context *ctx)
 	match;						\
 })
 
-	this_cpu_data()->stats[JAILHOUSE_CPU_STAT_VMEXITS_CP15]++;
+	this_cpu_public()->stats[JAILHOUSE_CPU_STAT_VMEXITS_CP15]++;
 
 	/* all regs are write-only / only trapped on writes */
 	if (read)
@@ -418,7 +421,7 @@ static const trap_handler trap_handlers[0x40] =
 	[HSR_EC_DABT]		= arch_handle_dabt,
 };
 
-void arch_handle_trap(struct per_cpu *cpu_data, struct registers *guest_regs)
+static void arch_handle_trap(union registers *guest_regs)
 {
 	struct trap_context ctx;
 	u32 exception_class;
@@ -450,4 +453,68 @@ void arch_handle_trap(struct per_cpu *cpu_data, struct registers *guest_regs)
 		dump_guest_regs(&ctx);
 		panic_park();
 	}
+}
+
+static void arch_dump_exit(union registers *regs, const char *reason)
+{
+	unsigned long pc;
+	unsigned int n;
+
+	arm_read_banked_reg(ELR_hyp, pc);
+	panic_printk("Unhandled HYP %s exit at 0x%lx\n", reason, pc);
+	for (n = 0; n < NUM_USR_REGS; n++)
+		panic_printk("r%d:%s 0x%08lx%s", n, n < 10 ? " " : "",
+			     regs->usr[n], n % 4 == 3 ? "\n" : "  ");
+	panic_printk("\n");
+}
+
+static void arch_dump_abt(bool is_data)
+{
+	u32 hxfar;
+	u32 hsr;
+
+	arm_read_sysreg(HSR, hsr);
+	if (is_data)
+		arm_read_sysreg(HDFAR, hxfar);
+	else
+		arm_read_sysreg(HIFAR, hxfar);
+
+	panic_printk("Physical address: 0x%08x HSR: 0x%08x\n", hxfar, hsr);
+}
+
+union registers* arch_handle_exit(union registers *regs)
+{
+	this_cpu_public()->stats[JAILHOUSE_CPU_STAT_VMEXITS_TOTAL]++;
+
+	switch (regs->exit_reason) {
+	case EXIT_REASON_IRQ:
+		irqchip_handle_irq();
+		break;
+	case EXIT_REASON_TRAP:
+		arch_handle_trap(regs);
+		break;
+
+	case EXIT_REASON_UNDEF:
+		arch_dump_exit(regs, "undef");
+		panic_stop();
+	case EXIT_REASON_DABT:
+		arch_dump_exit(regs, "data abort");
+		arch_dump_abt(true);
+		panic_stop();
+	case EXIT_REASON_PABT:
+		arch_dump_exit(regs, "prefetch abort");
+		arch_dump_abt(false);
+		panic_stop();
+	case EXIT_REASON_HVC:
+		arch_dump_exit(regs, "hvc");
+		panic_stop();
+	case EXIT_REASON_FIQ:
+		arch_dump_exit(regs, "fiq");
+		panic_stop();
+	default:
+		arch_dump_exit(regs, "unknown");
+		panic_stop();
+	}
+
+	return regs;
 }

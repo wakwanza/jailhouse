@@ -31,6 +31,7 @@
 
 static unsigned int gic_num_lr;
 static unsigned int gic_num_priority_bits;
+static unsigned int last_gicr;
 static u32 gic_version;
 
 static void *gicr_base;
@@ -123,6 +124,10 @@ static int gicv3_init(void)
 	if (!gicr_base)
 		return -ENOMEM;
 
+	last_gicr = system_config->root_cell.cpu_set_size * 8 - 1;
+	while (!cpu_id_valid(last_gicr))
+		last_gicr--;
+
 	return 0;
 }
 
@@ -148,7 +153,7 @@ static void gicv3_clear_pending_irqs(void)
 static void gicv3_cpu_reset(struct per_cpu *cpu_data)
 {
 	unsigned int mnt_irq = system_config->platform_info.arm.maintenance_irq;
-	void *gicr = cpu_data->gicr.base + GICR_SGI_BASE;
+	void *gicr = cpu_data->public.gicr.base + GICR_SGI_BASE;
 
 	gicv3_clear_pending_irqs();
 
@@ -181,7 +186,7 @@ static int gicv3_cpu_init(struct per_cpu *cpu_data)
 	if (gic_version != 3 && gic_version != 4)
 		return trace_error(-ENODEV);
 
-	mpidr = cpu_data->mpidr;
+	mpidr = cpu_data->public.mpidr;
 	aff = (MPIDR_AFFINITY_LEVEL(mpidr, 3) << 24 |
 	       MPIDR_AFFINITY_LEVEL(mpidr, 2) << 16 |
 	       MPIDR_AFFINITY_LEVEL(mpidr, 1) << 8 |
@@ -197,8 +202,8 @@ static int gicv3_cpu_init(struct per_cpu *cpu_data)
 
 		typer = mmio_read64(redist_base + GICR_TYPER);
 		if ((typer >> 32) == aff) {
-			cpu_data->gicr.base = redist_base;
-			cpu_data->gicr.phys_addr = redist_addr;
+			cpu_data->public.gicr.base = redist_base;
+			cpu_data->public.gicr.phys_addr = redist_addr;
 			break;
 		}
 
@@ -206,13 +211,14 @@ static int gicv3_cpu_init(struct per_cpu *cpu_data)
 		redist_addr += redist_size;
 	} while (!(typer & GICR_TYPER_Last));
 
-	if (!cpu_data->gicr.base) {
-		printk("GIC: No redist found for CPU%d\n", cpu_data->cpu_id);
+	if (!cpu_data->public.gicr.base) {
+		printk("GIC: No redist found for CPU%d\n",
+		       cpu_data->public.cpu_id);
 		return -ENODEV;
 	}
 
 	/* Make sure we can handle Aff0 with the TargetList of ICC_SGI1R_EL1. */
-	if ((cpu_data->mpidr & MPIDR_AFF0_MASK) >= 16)
+	if ((cpu_data->public.mpidr & MPIDR_AFF0_MASK) >= 16)
 		return trace_error(-EIO);
 
 	/* Ensure all IPIs and the maintenance PPI are enabled. */
@@ -261,17 +267,17 @@ static int gicv3_cpu_init(struct per_cpu *cpu_data)
 	return 0;
 }
 
-static int gicv3_cpu_shutdown(struct per_cpu *cpu_data)
+static int gicv3_cpu_shutdown(struct public_per_cpu *cpu_public)
 {
 	u32 ich_vmcr, icc_ctlr, cell_icc_igrpen1;
 
-	if (!cpu_data->gicr.base)
+	if (!cpu_public->gicr.base)
 		return -ENODEV;
 
 	arm_write_sysreg(ICH_HCR_EL2, 0);
 
 	/* Disable the maintenance interrupt - not used by Linux. */
-	mmio_write32(cpu_data->gicr.base + GICR_SGI_BASE + GICR_ICENABLER,
+	mmio_write32(cpu_public->gicr.base + GICR_SGI_BASE + GICR_ICENABLER,
 		     1 << system_config->platform_info.arm.maintenance_irq);
 
 	/* Restore the root config */
@@ -294,7 +300,7 @@ static int gicv3_cpu_shutdown(struct per_cpu *cpu_data)
 static void gicv3_adjust_irq_target(struct cell *cell, u16 irq_id)
 {
 	void *irouter = gicd_base + GICD_IROUTER + 8 * irq_id;
-	u64 mpidr = per_cpu(first_cpu(cell->cpu_set))->mpidr;
+	u64 mpidr = public_per_cpu(first_cpu(cell->cpu_set))->mpidr;
 	u32 route = arm_cpu_by_mpidr(cell,
 				     mmio_read64(irouter) & MPIDR_CPUID_MASK);
 
@@ -305,11 +311,15 @@ static void gicv3_adjust_irq_target(struct cell *cell, u16 irq_id)
 static enum mmio_result gicv3_handle_redist_access(void *arg,
 						   struct mmio_access *mmio)
 {
-	struct per_cpu *cpu_data = arg;
+	struct public_per_cpu *cpu_public = arg;
 
 	switch (mmio->address) {
-	case GICR_IIDR:
 	case GICR_TYPER:
+		mmio_perform_access(cpu_public->gicr.base, mmio);
+		if (cpu_public->cpu_id == last_gicr)
+				mmio->value |= GICR_TYPER_Last;
+		return MMIO_HANDLED;
+	case GICR_IIDR:
 	case 0xffd0 ... 0xfffc: /* ID registers */
 		/*
 		 * Read-only registers that might be used by a cell to find the
@@ -330,7 +340,7 @@ static enum mmio_result gicv3_handle_redist_access(void *arg,
 	case GICR_SGI_BASE + GICR_ICACTIVER:
 	case REG_RANGE(GICR_SGI_BASE + GICR_IPRIORITYR, 8, 4):
 	case REG_RANGE(GICR_SGI_BASE + GICR_ICFGR, 2, 4):
-		if (this_cell() != cpu_data->cell) {
+		if (this_cell() != cpu_public->cell) {
 			/* ignore access to foreign redistributors */
 			return MMIO_HANDLED;
 		}
@@ -340,7 +350,7 @@ static enum mmio_result gicv3_handle_redist_access(void *arg,
 		return MMIO_HANDLED;
 	}
 
-	mmio_perform_access(cpu_data->gicr.base, mmio);
+	mmio_perform_access(cpu_public->gicr.base, mmio);
 
 	return MMIO_HANDLED;
 }
@@ -356,9 +366,10 @@ static int gicv3_cell_init(struct cell *cell)
 	for (cpu = 0; cpu < system_config->root_cell.cpu_set_size * 8; cpu++) {
 		if (!cpu_id_valid(cpu))
 			continue;
-		mmio_region_register(cell, per_cpu(cpu)->gicr.phys_addr,
+		mmio_region_register(cell, public_per_cpu(cpu)->gicr.phys_addr,
 				     gic_version == 4 ? 0x40000 : 0x20000,
-				     gicv3_handle_redist_access, per_cpu(cpu));
+				     gicv3_handle_redist_access,
+				     public_per_cpu(cpu));
 	}
 
 	return 0;
@@ -457,7 +468,7 @@ static enum mmio_result gicv3_handle_irq_route(struct mmio_access *mmio,
 		 * Note that we do not support Interrupt Routing Mode = 1.
 		 */
 		for_each_cpu(cpu, cell->cpu_set)
-			if ((per_cpu(cpu)->mpidr & MPIDR_CPUID_MASK) ==
+			if ((public_per_cpu(cpu)->mpidr & MPIDR_CPUID_MASK) ==
 			    mmio->value) {
 				mmio_perform_access(gicd_base, mmio);
 				return MMIO_HANDLED;
@@ -486,7 +497,7 @@ static void gicv3_eoi_irq(u32 irq_id, bool deactivate)
 		arm_write_sysreg(ICC_DIR_EL1, irq_id);
 }
 
-static int gicv3_inject_irq(struct per_cpu *cpu_data, u16 irq_id)
+static int gicv3_inject_irq(u16 irq_id, u16 sender)
 {
 	int i;
 	int free_lr = -1;
@@ -528,6 +539,7 @@ static int gicv3_inject_irq(struct per_cpu *cpu_data, u16 irq_id)
 		lr |= ICH_LR_HW_BIT;
 		lr |= (u64)irq_id << ICH_LR_PHYS_ID_SHIFT;
 	}
+	/* GICv3 doesn't support the injection of the calling CPU ID */
 
 	gicv3_write_lr(free_lr, lr);
 
@@ -575,7 +587,7 @@ static int gicv3_get_pending_irq(void)
 
 static void gicv3_inject_phys_irq(u16 irq_id)
 {
-	void *gicr = this_cpu_data()->gicr.base + GICR_SGI_BASE;
+	void *gicr = this_cpu_public()->gicr.base + GICR_SGI_BASE;
 	unsigned int offset = (irq_id / 32) * 4;
 	unsigned int mask = 1 << (irq_id % 32);
 
@@ -628,12 +640,12 @@ static enum mmio_result gicv3_handle_dist_access(struct mmio_access *mmio)
 
 static int gicv3_get_cpu_target(unsigned int cpu_id)
 {
-	return 1 << per_cpu(cpu_id)->mpidr & MPIDR_AFF0_MASK;
+	return 1 << public_per_cpu(cpu_id)->mpidr & MPIDR_AFF0_MASK;
 }
 
 static u64 gicv3_get_cluster_target(unsigned int cpu_id)
 {
-	return per_cpu(cpu_id)->mpidr & MPIDR_CLUSTERID_MASK;
+	return public_per_cpu(cpu_id)->mpidr & MPIDR_CLUSTERID_MASK;
 }
 
 const struct irqchip gicv3_irqchip = {

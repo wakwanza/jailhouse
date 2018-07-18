@@ -18,6 +18,7 @@
 #include <jailhouse/paging.h>
 #include <jailhouse/control.h>
 #include <jailhouse/string.h>
+#include <jailhouse/unit.h>
 #include <generated/version.h>
 #include <asm/spinlock.h>
 
@@ -27,7 +28,7 @@ static const __attribute__((aligned(PAGE_SIZE))) u8 empty_page[PAGE_SIZE];
 
 static DEFINE_SPINLOCK(init_lock);
 static unsigned int master_cpu_id = -1;
-static volatile unsigned int initialized_cpus;
+static volatile unsigned int entered_cpus, initialized_cpus;
 static volatile int error;
 
 static void init_early(unsigned int cpu_id)
@@ -42,9 +43,7 @@ static void init_early(unsigned int cpu_id)
 	system_config = (struct jailhouse_system *)
 		(JAILHOUSE_BASE + core_and_percpu_size);
 
-	if (CON2_TYPE(system_config->debug_console.flags) ==
-	    JAILHOUSE_CON2_TYPE_ROOTPAGE)
-		virtual_console = true;
+	virtual_console = SYS_FLAGS_VIRTUAL_DEBUG_CONSOLE(system_config->flags);
 
 	arch_dbg_write_init();
 
@@ -102,14 +101,47 @@ static void cpu_init(struct per_cpu *cpu_data)
 {
 	int err = -EINVAL;
 
-	printk(" CPU %d... ", cpu_data->cpu_id);
+	printk(" CPU %d... ", cpu_data->public.cpu_id);
 
-	if (!cpu_id_valid(cpu_data->cpu_id))
+	if (!cpu_id_valid(cpu_data->public.cpu_id))
 		goto failed;
 
-	cpu_data->cell = &root_cell;
+	cpu_data->public.cell = &root_cell;
+
+	/* set up per-CPU page table */
+	cpu_data->pg_structs.hv_paging = true;
+	cpu_data->pg_structs.root_paging = hv_paging_structs.root_paging;
+	cpu_data->pg_structs.root_table =
+		(page_table_t)cpu_data->public.root_table_page;
+
+	err = paging_create_hvpt_link(&cpu_data->pg_structs, JAILHOUSE_BASE);
+	if (err)
+		goto failed;
+
+	if (CON_IS_MMIO(system_config->debug_console.flags)) {
+		err = paging_create_hvpt_link(&cpu_data->pg_structs,
+			(unsigned long)hypervisor_header.debug_console_base);
+		if (err)
+			goto failed;
+	}
+
+	/* set up private mapping of per-CPU data structure */
+	err = paging_create(&cpu_data->pg_structs, paging_hvirt2phys(cpu_data),
+			    sizeof(*cpu_data), LOCAL_CPU_BASE,
+			    PAGE_DEFAULT_FLAGS, PAGING_NON_COHERENT);
+	if (err)
+		goto failed;
 
 	err = arch_cpu_init(cpu_data);
+	if (err)
+		goto failed;
+
+	/* Make sure any remappings to the temporary regions can be performed
+	 * without allocations of page table pages. */
+	err = paging_create(&cpu_data->pg_structs, 0,
+			    NUM_TEMPORARY_PAGES * PAGE_SIZE,
+			    TEMPORARY_MAPPING_BASE, PAGE_NONPRESENT_FLAGS,
+			    PAGING_NON_COHERENT);
 	if (err)
 		goto failed;
 
@@ -129,26 +161,11 @@ failed:
 	error = err;
 }
 
-int map_root_memory_regions(void)
-{
-	const struct jailhouse_memory *mem;
-	unsigned int n;
-	int err;
-
-	for_each_mem_region(mem, root_cell.config, n) {
-		if (JAILHOUSE_MEMORY_IS_SUBPAGE(mem))
-			err = mmio_subpage_register(&root_cell, mem);
-		else
-			err = arch_map_memory_region(&root_cell, mem);
-		if (err)
-			return err;
-	}
-	return 0;
-}
-
 static void init_late(void)
 {
-	unsigned int cpu, expected_cpus = 0;
+	unsigned int n, cpu, expected_cpus = 0;
+	const struct jailhouse_memory *mem;
+	struct unit *unit;
 
 	for_each_cpu(cpu, root_cell.cpu_set)
 		expected_cpus++;
@@ -157,13 +174,21 @@ static void init_late(void)
 		return;
 	}
 
-	error = arch_init_late();
-	if (error)
-		return;
+	for_each_unit(unit) {
+		printk("Initializing unit: %s\n", unit->name);
+		error = unit->init();
+		if (error)
+			return;
+	}
 
-	error = pci_init();
-	if (error)
-		return;
+	for_each_mem_region(mem, root_cell.config, n) {
+		if (JAILHOUSE_MEMORY_IS_SUBPAGE(mem))
+			error = mmio_subpage_register(&root_cell, mem);
+		else
+			error = arch_map_memory_region(&root_cell, mem);
+		if (error)
+			return;
+	}
 
 	config_commit(&root_cell);
 
@@ -171,15 +196,30 @@ static void init_late(void)
 }
 
 /*
- * This is the entry point, called by the Linux driver on each CPU
- * when initializing Jailhouse.
+ * This is the architecture independent C entry point, which is called by
+ * arch_entry. This routine is called on each CPU when initializing Jailhouse.
  */
 int entry(unsigned int cpu_id, struct per_cpu *cpu_data)
 {
 	static volatile bool activate;
 	bool master = false;
 
-	cpu_data->cpu_id = cpu_id;
+	cpu_data->public.cpu_id = cpu_id;
+
+	spin_lock(&init_lock);
+
+	/*
+	 * If this CPU is last, make sure everything was committed before we
+	 * signal the other CPUs spinning on entered_cpus that they can
+	 * continue.
+	 */
+	memory_barrier();
+	entered_cpus++;
+
+	spin_unlock(&init_lock);
+
+	while (entered_cpus < hypervisor_header.online_cpus)
+		cpu_relax();
 
 	spin_lock(&init_lock);
 
@@ -216,7 +256,7 @@ int entry(unsigned int cpu_id, struct per_cpu *cpu_data)
 	if (error) {
 		if (master)
 			shutdown();
-		arch_cpu_restore(cpu_data, error);
+		arch_cpu_restore(cpu_id, error);
 		return error;
 	}
 
@@ -224,7 +264,7 @@ int entry(unsigned int cpu_id, struct per_cpu *cpu_data)
 		printk("Activating hypervisor\n");
 
 	/* point of no return */
-	arch_cpu_activate_vmm(cpu_data);
+	arch_cpu_activate_vmm();
 }
 
 /** Hypervisor description header. */

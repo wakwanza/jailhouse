@@ -26,15 +26,14 @@ LINUXINCLUDE := -I$(src)/arch/$(SRCARCH)/include \
 KBUILD_CFLAGS := -g -Os -Wall -Wstrict-prototypes -Wtype-limits \
 		 -Wmissing-declarations -Wmissing-prototypes \
 		 -fno-strict-aliasing -fno-pic -fno-common \
-		 -fno-stack-protector -fno-builtin-ffsl
+		 -fno-stack-protector -fno-builtin-ffsl \
+		 -D__LINUX_COMPILER_TYPES_H
 
 include $(src)/arch/$(SRCARCH)/Makefile
 
 ifneq ($(wildcard $(INC_CONFIG_H)),)
 KBUILD_CFLAGS += -include $(INC_CONFIG_H)
 endif
-
-GCOV_PROFILE := n
 
 CORE_OBJECTS = setup.o printk.o paging.o control.o lib.o mmio.o pci.o ivshmem.o
 CORE_OBJECTS += uart.o uart-8250.o
@@ -94,15 +93,15 @@ subdir-y := arch/$(SRCARCH)
 define BUILD_JAILHOUSE_template
 always += jailhouse$(1).bin
 
-$$(obj)/arch/$$(SRCARCH)/built-in$(1).o: $$(obj)/arch/$$(SRCARCH)
+$$(obj)/arch/$$(SRCARCH)/lib$(1).a: $$(obj)/arch/$$(SRCARCH)
+	@true
 
-hypervisor$(1)-y := $$(CORE_OBJECTS) arch/$$(SRCARCH)/built-in$(1).o \
-	hypervisor.lds
+hypervisor$(1)-y := arch/$$(SRCARCH)/lib$(1).a $$(CORE_OBJECTS) hypervisor.lds
 targets += $$(hypervisor$(1)-y)
 
 HYPERVISOR$(1)_OBJS = $$(addprefix $$(obj)/,$$(hypervisor$(1)-y))
 
-LDFLAGS_hypervisor$(1).o := -T
+LDFLAGS_hypervisor$(1).o := --whole-archive -T
 
 targets += hypervisor$(1).o
 $$(obj)/hypervisor$(1).o: $$(src)/hypervisor.lds $$(HYPERVISOR$(1)_OBJS)

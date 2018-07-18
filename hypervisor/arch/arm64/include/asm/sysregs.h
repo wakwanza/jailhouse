@@ -29,9 +29,9 @@
 #define RESET_PSR	(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT \
 			| PSR_MODE_EL1h)
 
-#define MPIDR_CPUID_MASK	0xff00ffffff
-#define MPIDR_CLUSTERID_MASK	0xff00ffff00
-#define MPIDR_AFF0_MASK		0x00000000ff
+#define MPIDR_CPUID_MASK	0xff00ffffffUL
+#define MPIDR_CLUSTERID_MASK	0xff00ffff00UL
+#define MPIDR_AFF0_MASK		0x00000000ffUL
 #define MPIDR_U_BIT		(1 << 30)
 #define MPIDR_MP_BIT		(1 << 31)
 
@@ -107,14 +107,11 @@
 #define HCR_VM_BIT	(1u << 0)
 
 /* exception class */
-#define ESR_EC_SHIFT		26
-#define ESR_EC(hsr)		((hsr) >> ESR_EC_SHIFT & 0x3f)
+#define ESR_EC(esr)		GET_FIELD((esr), 31, 26)
 /* instruction length */
-#define ESR_IL_SHIFT		25
-#define ESR_IL(hsr)		((hsr) >> ESR_IL_SHIFT & 0x1)
-/* Instruction specific syndrom */
-#define ESR_ISS_MASK		0x1ffffff
-#define ESR_ISS(esr)		((esr) & ESR_ISS_MASK)
+#define ESR_IL(esr)		GET_FIELD((esr), 25, 25)
+/* Instruction specific syndrome */
+#define ESR_ISS(esr)		GET_FIELD((esr), 24, 0)
 /* Exception classes values */
 #define ESR_EC_UNKNOWN		0x00
 #define ESR_EC_WFx		0x01

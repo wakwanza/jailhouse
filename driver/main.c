@@ -22,6 +22,7 @@
 #include <linux/miscdevice.h>
 #include <linux/firmware.h>
 #include <linux/mm.h>
+#include <linux/kallsyms.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
 #include <linux/sched/signal.h>
 #endif
@@ -38,6 +39,9 @@
 #include <asm/tlbflush.h>
 #ifdef CONFIG_ARM
 #include <asm/virt.h>
+#endif
+#ifdef CONFIG_X86
+#include <asm/msr.h>
 #endif
 
 #include "cell.h"
@@ -75,9 +79,7 @@ MODULE_FIRMWARE(JAILHOUSE_FW_NAME);
 #endif
 MODULE_VERSION(JAILHOUSE_VERSION);
 
-#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
 extern unsigned int __hyp_stub_vectors[];
-#endif
 
 struct console_state {
 	unsigned int head;
@@ -92,9 +94,20 @@ static struct device *jailhouse_dev;
 static unsigned long hv_core_and_percpu_size;
 static atomic_t call_done;
 static int error_code;
-static struct jailhouse_console* volatile console_page;
+static struct jailhouse_virt_console* volatile console_page;
 static bool console_available;
 static struct resource *hypervisor_mem_res;
+
+static typeof(ioremap_page_range) *ioremap_page_range_sym;
+#ifdef CONFIG_X86
+static typeof(lapic_timer_frequency) *lapic_timer_frequency_sym;
+#endif
+#ifdef CONFIG_ARM
+static typeof(__boot_cpu_mode) *__boot_cpu_mode_sym;
+#endif
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+static typeof(__hyp_stub_vectors) *__hyp_stub_vectors_sym;
+#endif
 
 /* last_console contains three members:
  *   - valid: indicates if content in the page member is present
@@ -111,7 +124,7 @@ static struct resource *hypervisor_mem_res;
 static struct {
 	bool valid;
 	unsigned int id;
-	struct jailhouse_console page;
+	struct jailhouse_virt_console page;
 } last_console;
 
 #ifdef CONFIG_X86
@@ -127,7 +140,7 @@ static void init_hypercall(void)
 }
 #endif
 
-static void copy_console_page(struct jailhouse_console *dst)
+static void copy_console_page(struct jailhouse_virt_console *dst)
 {
 	unsigned int tail;
 
@@ -139,7 +152,8 @@ static void copy_console_page(struct jailhouse_console *dst)
 		rmb();
 
 		/* copy console page */
-		memcpy(dst, console_page, sizeof(struct jailhouse_console));
+		memcpy(dst, console_page,
+		       sizeof(struct jailhouse_virt_console));
 		rmb();
 	} while (console_page->tail != tail || console_page->busy);
 }
@@ -191,9 +205,9 @@ void *jailhouse_ioremap(phys_addr_t phys, unsigned long virt,
 		return NULL;
 	vma->phys_addr = phys;
 
-	if (ioremap_page_range((unsigned long)vma->addr,
-			       (unsigned long)vma->addr + size, phys,
-			       PAGE_KERNEL_EXEC)) {
+	if (ioremap_page_range_sym((unsigned long)vma->addr,
+				   (unsigned long)vma->addr + size, phys,
+				   PAGE_KERNEL_EXEC)) {
 		vunmap(vma->addr);
 		return NULL;
 	}
@@ -245,7 +259,8 @@ static inline const char * jailhouse_get_fw_name(void)
 #endif
 }
 
-static int __jailhouse_console_dump_delta(struct jailhouse_console *console,
+static int __jailhouse_console_dump_delta(struct jailhouse_virt_console
+						*console,
 					  char *dst, unsigned int head,
 					  unsigned int *miss)
 {
@@ -299,7 +314,7 @@ int jailhouse_console_dump_delta(char *dst, unsigned int head,
 				 unsigned int *miss)
 {
 	int ret;
-	struct jailhouse_console *console;
+	struct jailhouse_virt_console *console;
 
 	if (!jailhouse_enabled)
 		return -EAGAIN;
@@ -307,7 +322,7 @@ int jailhouse_console_dump_delta(char *dst, unsigned int head,
 	if (!console_available)
 		return -EPERM;
 
-	console = kmalloc(sizeof(struct jailhouse_console), GFP_KERNEL);
+	console = kmalloc(sizeof(struct jailhouse_virt_console), GFP_KERNEL);
 	if (console == NULL)
 		return -ENOMEM;
 
@@ -335,6 +350,7 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 	unsigned long remap_addr = 0;
 	void __iomem *console = NULL, *clock_reg = NULL;
 	unsigned long config_size;
+	unsigned int clock_gates;
 	const char *fw_name;
 	long max_cpus;
 	int err;
@@ -374,10 +390,25 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 		goto error_unlock;
 
 #ifdef CONFIG_ARM
-	if (!is_hyp_mode_available()) {
+	/* open-coded is_hyp_mode_available to use __boot_cpu_mode_sym */
+	if ((*__boot_cpu_mode_sym & MODE_MASK) != HYP_MODE ||
+	    (*__boot_cpu_mode_sym) & BOOT_CPU_MODE_MISMATCH) {
 		pr_err("jailhouse: HYP mode not available\n");
 		err = -ENODEV;
 		goto error_put_module;
+	}
+#endif
+#ifdef CONFIG_X86
+	if (boot_cpu_has(X86_FEATURE_VMX)) {
+		u64 features;
+
+		rdmsrl(MSR_IA32_FEATURE_CONTROL, features);
+		if ((features &
+		     FEATURE_CONTROL_VMXON_ENABLED_OUTSIDE_SMX) == 0) {
+			pr_err("jailhouse: VT-x disabled by Firmware/BIOS\n");
+			err = -ENODEV;
+			goto error_put_module;
+		}
 	}
 #endif
 
@@ -414,7 +445,7 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 						hv_mem->size,
 						"Jailhouse hypervisor");
 	if (!hypervisor_mem_res) {
-		pr_err("jailhouse: mem_region_request failed for hypervisor "
+		pr_err("jailhouse: request_mem_region failed for hypervisor "
 		       "memory.\n");
 		pr_notice("jailhouse: Did you reserve the memory with "
 			  "\"memmap=\" or \"mem=\"?\n");
@@ -430,7 +461,7 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 		goto error_release_memreg;
 	}
 
-	console_page = (struct jailhouse_console*)
+	console_page = (struct jailhouse_virt_console*)
 		(hypervisor_mem + header->console_page);
 	last_console.valid = false;
 
@@ -444,7 +475,7 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 	header->max_cpus = max_cpus;
 
 #if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
-	header->arm_linux_hyp_vectors = virt_to_phys(__hyp_stub_vectors);
+	header->arm_linux_hyp_vectors = virt_to_phys(*__hyp_stub_vectors_sym);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	header->arm_linux_hyp_abi = HYP_STUB_ABI_LEGACY;
 #else
@@ -474,8 +505,29 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 		goto error_unmap;
 	}
 
+	if (config->debug_console.clock_reg) {
+		clock_reg = ioremap(config->debug_console.clock_reg,
+				    sizeof(clock_gates));
+		if (!clock_reg) {
+			err = -EINVAL;
+			pr_err("jailhouse: Unable to map clock register at "
+			       "%08lx\n",
+			       (unsigned long)config->debug_console.clock_reg);
+			goto error_unmap;
+		}
+
+		clock_gates = readl(clock_reg);
+		if (CON_HAS_INVERTED_GATE(config->debug_console.flags))
+			clock_gates &= ~(1 << config->debug_console.gate_nr);
+		else
+			clock_gates |= (1 << config->debug_console.gate_nr);
+		writel(clock_gates, clock_reg);
+
+		iounmap(clock_reg);
+	}
+
 #ifdef JAILHOUSE_BORROW_ROOT_PT
-	if (CON1_IS_MMIO(config->debug_console.flags)) {
+	if (CON_IS_MMIO(config->debug_console.flags)) {
 		console = ioremap(config->debug_console.address,
 				  config->debug_console.size);
 		if (!console) {
@@ -489,29 +541,16 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 		 * to enforce conversion. */
 		header->debug_console_base = (void * __force)console;
 	}
-
-	if (config->debug_console.clock_reg) {
-		clock_reg = ioremap(config->debug_console.clock_reg, 1);
-		if (!clock_reg) {
-			err = -EINVAL;
-			pr_err("jailhouse: Unable to map hypervisor debug "
-			       "clock register at %08lx\n",
-			       (unsigned long)config->debug_console.clock_reg);
-			goto error_unmap;
-		}
-		header->debug_clock_reg = (void * __force)clock_reg;
-	}
 #endif
 
-	console_available = CON2_TYPE(config->debug_console.flags) ==
-				JAILHOUSE_CON2_TYPE_ROOTPAGE;
+	console_available = SYS_FLAGS_VIRTUAL_DEBUG_CONSOLE(config->flags);
 
 #ifdef CONFIG_X86
 	if (config->platform_info.x86.tsc_khz == 0)
 		config->platform_info.x86.tsc_khz = tsc_khz;
 	if (config->platform_info.x86.apic_khz == 0)
 		config->platform_info.x86.apic_khz =
-			lapic_timer_frequency / (1000 / HZ);
+			*lapic_timer_frequency_sym / (1000 / HZ);
 #endif
 
 	err = jailhouse_cell_prepare_root(&config->root_cell);
@@ -538,8 +577,6 @@ static int jailhouse_cmd_enable(struct jailhouse_system __user *arg)
 
 	if (console)
 		iounmap(console);
-	if (clock_reg)
-		iounmap(clock_reg);
 
 	release_firmware(hypervisor);
 
@@ -562,8 +599,6 @@ error_unmap:
 	jailhouse_firmware_free();
 	if (console)
 		iounmap(console);
-	if (clock_reg)
-		iounmap(clock_reg);
 
 error_release_memreg:
 	/* jailhouse_firmware_free() could have been called already and
@@ -649,7 +684,7 @@ static int jailhouse_cmd_disable(void)
 	 * This flag has been set when onlining a CPU under Jailhouse
 	 * supervision into SVC instead of HYP mode.
 	 */
-	__boot_cpu_mode &= ~BOOT_CPU_MODE_MISMATCH;
+	*__boot_cpu_mode_sym &= ~BOOT_CPU_MODE_MISMATCH;
 #endif
 
 	atomic_set(&call_done, 0);
@@ -849,6 +884,27 @@ static struct notifier_block jailhouse_shutdown_nb = {
 static int __init jailhouse_init(void)
 {
 	int err;
+
+#ifdef CONFIG_KALLSYMS_ALL
+#define RESOLVE_EXTERNAL_SYMBOL(symbol)				\
+	symbol##_sym = (void *)kallsyms_lookup_name(#symbol);	\
+	if (!symbol##_sym)					\
+		return -EINVAL
+#else
+#define RESOLVE_EXTERNAL_SYMBOL(symbol)				\
+	symbol##_sym = &symbol
+#endif
+
+	RESOLVE_EXTERNAL_SYMBOL(ioremap_page_range);
+#ifdef CONFIG_X86
+	RESOLVE_EXTERNAL_SYMBOL(lapic_timer_frequency);
+#endif
+#ifdef CONFIG_ARM
+	RESOLVE_EXTERNAL_SYMBOL(__boot_cpu_mode);
+#endif
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+	RESOLVE_EXTERNAL_SYMBOL(__hyp_stub_vectors);
+#endif
 
 	jailhouse_dev = root_device_register("jailhouse");
 	if (IS_ERR(jailhouse_dev))
